@@ -1,5 +1,9 @@
 # Enact Agent distribution
 
+Read [the overlay maintenance and installation contract](AGENTS.md) before
+changing this fork or synchronizing upstream. It also contains the verified
+three-target prebuilt installation route.
+
 The headless distribution source fork is
 [adl-tan-theta/enact-agent](https://github.com/adl-tan-theta/enact-agent).
 `origin` remains `https://github.com/zeroclaw-labs/zeroclaw.git`; the `enact`
