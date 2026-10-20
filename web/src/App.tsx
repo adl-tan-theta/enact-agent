@@ -15,8 +15,10 @@ import { AuthProvider, useAuth } from "./hooks/useAuth";
 import { DraftContext, useDraftStore } from "./hooks/useDraft";
 import { getAdminPairCode, generatePairCode, PairCodeForbiddenError, getQuickstartState } from "./lib/api";
 import { basePath } from "./lib/basePath";
+import { brand, brandLogo } from "./lib/branding";
+import { useTheme } from "./hooks/useTheme";
 import { ConfigDraftProvider } from "./lib/draftStore";
-import { setLocale, type Locale } from "./lib/i18n";
+import { setLocale, t, type Locale } from "./lib/i18n";
 import { Router } from "./router/router";
 
 // Locale context
@@ -133,6 +135,7 @@ function PairingDialog({
 }: {
   onPair: (code: string) => Promise<void>;
 }) {
+  const { resolvedTheme } = useTheme();
   const [code, setCode] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -153,7 +156,7 @@ function PairingDialog({
   // can show the exact recovery command — including the alternate port that made
   // the config-default `get-paircode` miss the running instance (#5266).
   const gatewayPort = window.location.port;
-  const cliRecoveryCommand = `zeroclaw gateway get-paircode --new${gatewayPort ? ` --port ${gatewayPort}` : ""}`;
+  const cliRecoveryCommand = `${brand.command} gateway get-paircode --new${gatewayPort ? ` --port ${gatewayPort}` : ""}`;
 
   // Fetch the current pairing code (public endpoint works in Docker too)
   useEffect(() => {
@@ -228,15 +231,15 @@ function PairingDialog({
       <div className="relative surface-panel p-8 w-full max-w-md animate-fade-in-scale">
         <div className="text-center mb-8">
           <img
-            src={`${basePath}/_app/logo.png`}
-            alt="ZeroClaw"
-            className="h-20 w-20 rounded-2xl object-cover mx-auto mb-4 animate-float"
+            src={`${basePath}/_app/${brandLogo(resolvedTheme)}`}
+            alt={t("sidebar.logo_alt")}
+            className="h-20 w-20 object-contain mx-auto mb-4 animate-float"
             onError={(e) => {
               e.currentTarget.style.display = "none";
             }}
           />
           <h1 className="text-2xl font-bold mb-2 text-gradient-blue">
-            ZeroClaw
+            {t("sidebar.brand")}
           </h1>
           <p className="text-sm" style={{ color: "var(--pc-text-muted)" }}>
             {codeLoading

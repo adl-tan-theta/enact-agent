@@ -1,0 +1,7 @@
+{
+  "name": "Enact Agent",
+  "command": "enact-agent",
+  "accent": "violet",
+  "logo": "enact-logo.svg",
+  "logoDark": "enact-logo-dark.svg"
+}

@@ -6,6 +6,7 @@ import ReloadBanner from '@/components/layout/ReloadBanner';
 import UnsavedChangesBanner from '@/components/layout/UnsavedChangesBanner';
 import CommandPalette, { useCommandPalette } from '@/components/CommandPalette';
 import { ErrorBoundary } from '@/App';
+import { brand } from '@/lib/branding';
 import { t } from '@/lib/i18n';
 
 // First-path-segment → i18n title key, so the browser tab/history/bookmark
@@ -50,7 +51,7 @@ export default function Layout() {
       const key = TITLE_KEYS[first];
       name = key ? t(key) : null;
     }
-    document.title = name ? `${name} — ZeroClaw` : 'ZeroClaw';
+    document.title = name ? `${name} — ${brand.name}` : brand.name;
   }, [pathname]);
 
   return (
