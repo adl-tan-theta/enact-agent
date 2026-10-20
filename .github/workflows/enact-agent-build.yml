@@ -19,17 +19,26 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.12'
       - name: Build committed source and qualify extracted archive
         run: |
           set -euo pipefail
           git remote rename origin enact
           git remote add origin https://github.com/zeroclaw-labs/zeroclaw.git
-          rustup toolchain install 1.95.0 --profile minimal --component rustfmt
-          rustup default 1.95.0
+          python_bin="$(command -v python)"
+          test -x "$python_bin"
+          msrv="$("$python_bin" -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["rust-version"])')"
+          [[ "$msrv" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          rustup toolchain install "$msrv" --profile minimal --component rustfmt
+          rustup default "$msrv"
           cargo_bin="$(rustup which cargo)"
           rustc_bin="$(rustup which rustc)"
-          python_bin="$(find "$RUNNER_TOOL_CACHE/Python" -name python3 -path '*/3.12.*/*/bin/python3' | sort | tail -1)"
-          test -x "$python_bin"
+          printf 'Python executable: %s\n' "$python_bin"
+          "$python_bin" --version
+          "$cargo_bin" --version
+          "$rustc_bin" --version
           env -i HOME="$HOME" PATH="$PATH" LANG=C.UTF-8 "$cargo_bin" fetch --locked
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
           output="$RUNNER_TEMP/enact-release"
