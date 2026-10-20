@@ -1,3 +1,4 @@
+import { brand } from '../lib/branding';
 import { createContext, useState, useEffect, useCallback, type ReactNode } from 'react';
 import { colorThemeMap, DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME, type ColorThemeId } from './colorThemes';
 
@@ -42,7 +43,7 @@ export interface ThemeContextValue {
 
 export const ThemeContext = createContext<ThemeContextValue>({
   theme: 'dark',
-  accent: 'cyan',
+  accent: brand.accent as AccentColor,
   colorTheme: 'operator-dark',
   uiFont: 'system',
   monoFont: 'jetbrains',
@@ -113,7 +114,7 @@ interface StoredTheme {
 
 const DEFAULTS: StoredTheme = {
   theme: 'dark',
-  accent: 'cyan',
+  accent: brand.accent as AccentColor,
   colorTheme: 'operator-dark',
   uiFont: 'system',
   monoFont: 'jetbrains',

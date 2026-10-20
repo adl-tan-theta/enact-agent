@@ -488,7 +488,7 @@ export function SettingsModal({ open, onClose }: Props) {
                   className="rounded-[var(--radius-md)] border border-pc-border bg-pc-code p-2 text-[13px] text-pc-text"
                   style={{ fontFamily: 'var(--pc-font-mono)', fontSize: 'var(--pc-font-size-mono)' }}
                 >
-                  const hello = 'ZeroClaw'; // typography preview
+                  const hello = t('sidebar.brand'); // typography preview
                 </div>
               </div>
             </>

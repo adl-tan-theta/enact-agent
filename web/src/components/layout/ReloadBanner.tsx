@@ -1,3 +1,4 @@
+import { brand } from '@/lib/branding';
 import { useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { AlertTriangle, X } from 'lucide-react';
@@ -122,7 +123,7 @@ export default function ReloadBanner() {
         {!reloadAvailable && (
           <p className="text-xs mt-1 text-pc-text-muted">
             {t('reload_banner.remote_note_prefix')}{' '}
-            <code className="font-mono">zeroclaw reload</code>
+            <code className="font-mono">{brand.command} reload</code>
             {t('reload_banner.remote_note_suffix')}
           </p>
         )}
