@@ -1,5 +1,5 @@
 {
-  "version": "0.8.6-enact.1",
+  "version": "0.8.6-enact.2",
   "upstreamRepository": "https://github.com/zeroclaw-labs/zeroclaw.git",
   "forkRepository": "https://github.com/adl-tan-theta/enact-agent.git",
   "upstreamCommit": "ee2f5f58f7d760456cf6a61f531784b7f7696a7c"

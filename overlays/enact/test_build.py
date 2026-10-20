@@ -129,6 +129,39 @@ class ToolResultStatusProjectionTests(unittest.TestCase):
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_fixed_encoded_remap_flag_preserves_spaces_without_inherited_flags(self):
+        home = "/private/fixture builder/home with spaces"
+        with patch.dict(build.os.environ, {"HOME": home, "RUSTFLAGS": "--cfg inherited_flag",
+                                         "CARGO_ENCODED_RUSTFLAGS": "--cfg\x1finherited_flag",
+                                         "PROVIDER_CREDENTIAL": "fixture-marker"}):
+            env = build.native_build_environment("/tools/cargo", "/tools/rustc",
+                                                {"forkCommit": "1" * 40, "forkWorkingTreeDirty": False})
+        self.assertEqual(env["CARGO_ENCODED_RUSTFLAGS"].split("\x1f"),
+                         [f"--remap-path-prefix={home}=/build/home"])
+        self.assertNotIn("RUSTFLAGS", env)
+        self.assertNotIn("PROVIDER_CREDENTIAL", env)
+        self.assertNotIn("inherited_flag", env["CARGO_ENCODED_RUSTFLAGS"])
+
+    def test_private_home_binary_scan_fails_closed_without_printing_path(self):
+        home = "/private/fixture builder/home with spaces"
+        with tempfile.TemporaryDirectory() as name:
+            binary = Path(name) / "binary-fixture"
+            binary.write_bytes(b"prefix" + home.encode() + b"/source.rs")
+            with self.assertRaisesRegex(RuntimeError, "publication refused") as caught:
+                build.require_private_home_absent(binary, home)
+            self.assertNotIn(home, str(caught.exception))
+            binary.write_bytes(b"/build/home/source.rs")
+            build.require_private_home_absent(binary, home)
+            actual_home = Path(name) / "actual fixture home"
+            actual_home.mkdir()
+            alias_home = Path(name) / "alias fixture home"
+            alias_home.symlink_to(actual_home, target_is_directory=True)
+            binary.write_bytes(str(actual_home.resolve()).encode() + b"/source.rs")
+            with self.assertRaisesRegex(RuntimeError, "publication refused") as caught:
+                build.require_private_home_absent(binary, str(alias_home))
+            self.assertNotIn(str(actual_home), str(caught.exception))
+            self.assertNotIn(str(alias_home), str(caught.exception))
+
     def test_upstream_base_does_not_follow_fork_head(self):
         fork = "1" * 40
         with patch.object(build, "run"), patch.object(build.subprocess, "check_output",
@@ -154,7 +187,7 @@ class ReleaseTests(unittest.TestCase):
                                    "sizeBytes": binary.stat().st_size, "target": "aarch64-apple-darwin"}}
             (artifact / "manifest.json").write_text(json.dumps(metadata))
             (artifact / "RELEASE.json").write_text(json.dumps({
-                "distribution": {"version": "0.8.6-enact.1", "tag": "enact-agent-v0.8.6-enact.1"},
+                "distribution": {"version": "0.8.6-enact.2", "tag": "enact-agent-v0.8.6-enact.2"},
                 "manifestSha256": hashlib.sha256((artifact / "manifest.json").read_bytes()).hexdigest()}))
             source = root / "source"
             (source / "web/public").mkdir(parents=True)
@@ -167,6 +200,10 @@ class ReleaseTests(unittest.TestCase):
             with patch.object(build, "SOURCE", source):
                 archive = build.package_native_release(brand, artifact, root)
                 with tarfile.open(archive) as stream:
+                    for member in stream.getmembers():
+                        self.assertEqual((member.uid, member.gid, member.uname, member.gname), (0, 0, "", ""))
+                        self.assertFalse(set(member.pax_headers) & {"uid", "gid", "uname", "gname",
+                            "SCHILY.uid", "SCHILY.gid", "SCHILY.uname", "SCHILY.gname"})
                     members = {Path(member.name).relative_to(archive.name.removesuffix(".tar.gz")).as_posix(): member
                                for member in stream.getmembers() if member.isfile()}
                     self.assertEqual(set(members), {brand["command"], "manifest.json", "RELEASE.json", "LICENSE-APACHE",
@@ -183,6 +220,14 @@ class ReleaseTests(unittest.TestCase):
                 binary.write_bytes(b"tampered")
                 with self.assertRaisesRegex(RuntimeError, "does not match"):
                     build.package_native_release(brand, artifact, root)
+
+    def test_owner_pax_fields_are_removed(self):
+        member = tarfile.TarInfo("ownership-fixture")
+        member.uid, member.gid, member.uname, member.gname = 501, 20, "builder-fixture", "group-fixture"
+        member.pax_headers = {"uid": "501", "uname": "builder-fixture", "SCHILY.gid": "20", "mtime": "1.25"}
+        result = build.public_tar_member(member)
+        self.assertEqual((result.uid, result.gid, result.uname, result.gname), (0, 0, "", ""))
+        self.assertEqual(result.pax_headers, {"mtime": "1.25"})
 
     def test_canonical_multiline_svg_dimensions_and_tray_indicator(self):
         brand = build.manifest()

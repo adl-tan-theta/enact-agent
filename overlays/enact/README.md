@@ -9,7 +9,7 @@ remain intact.
 `brand.json` defines the display name, command, accent and canonical light/dark
 logo files. `release.json` pins the upstream source base, fork repository,
 distribution version. The compiler host determines the artifact target. The distribution tag
-`enact-agent-v0.8.6-enact.1` is separate from the upstream binary version `0.8.6`.
+`enact-agent-v0.8.6-enact.2` is separate from the upstream binary version `0.8.6`.
 
 ## Apple Silicon headless release
 
@@ -32,11 +32,15 @@ The release build uses locked, offline Cargo dependencies; these must already
 be cached. It fails on a dirty source checkout or an existing output directory.
 It reads source from the committed Git tree and excludes ignored web output.
 Cargo receives a restricted environment without inherited provider credentials
-or compiler overrides.
+or compiler overrides. One fixed encoded Rust flag maps the build HOME path to
+`/build/home`, including HOME paths containing spaces. Release creation fails
+before packaging if the resulting binary still contains the actual build HOME
+path. `RELEASE.json` records this policy without recording the private path.
+Archive owner IDs/names and ownership PAX fields are normalized.
 
-Output is under `target/enact/releases/enact-agent-v0.8.6-enact.1/`:
+Output is under `target/enact/releases/enact-agent-v0.8.6-enact.2/`:
 
-- `enact-agent-v0.8.6-enact.1-aarch64-apple-darwin.tar.gz` and its `SHA256SUMS`.
+- `enact-agent-v0.8.6-enact.2-aarch64-apple-darwin.tar.gz` and its `SHA256SUMS`.
 - An unpacked `enact-agent/` directory for local qualification.
 
 The archive contains the executable, `manifest.json`, `RELEASE.json`, both upstream licenses,
@@ -48,8 +52,9 @@ This local release has no notarization or GitHub build attestation. Checksums
 establish file integrity, not publisher identity.
 
 The optional **Enact Agent native build** workflow runs only on manual dispatch
-from a committed fork ref. Ubuntu 22.04 x64 and macOS 15 Intel runners use
-Rust 1.95.0, locked dependency prefetch and the offline release build. Each job
+from a committed fork ref. Ubuntu 22.04 x64, macOS 15 Intel and macOS 15 Apple
+Silicon runners use the canonical workspace `rust-version`, locked dependency
+prefetch and the offline release build. Each job
 tests the extracted archive against the local fixture and uploads its target
 archive plus `SHA256SUMS` as workflow artifacts. It does not publish a GitHub
 Release or use provider credentials. Each additional target remains unqualified
@@ -59,7 +64,7 @@ Qualify the unpacked executable without real provider credentials or paid calls:
 
 ```sh
 python3 -B overlays/enact/probe_native.py \
-  --binary target/enact/releases/enact-agent-v0.8.6-enact.1/enact-agent/enact-agent
+  --binary target/enact/releases/enact-agent-v0.8.6-enact.2/enact-agent/enact-agent
 ```
 
 The fixture exercises local RPC, constructed MCP inventory, approval rejection,

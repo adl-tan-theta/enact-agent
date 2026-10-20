@@ -18,6 +18,7 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "target/enact"
 SOURCE = OUT / "source"
+PUBLIC_BUILD_HOME = "/build/home"
 
 
 def release_manifest():
@@ -486,6 +487,29 @@ def build(brand, debug=False):
     run(str(bindir / brand["command"]), "--version")
 
 
+def native_build_environment(cargo, rustc, provenance):
+    """Use one fixed encoded flag; spaces in HOME remain inside that flag."""
+    home = os.environ["HOME"]
+    if not Path(home).is_absolute() or home == Path(home).anchor or "\x1f" in home:
+        raise ValueError("Native build requires an absolute non-root HOME without flag separators")
+    return {"PATH": os.pathsep.join(dict.fromkeys([str(Path(cargo).parent), str(Path(rustc).parent),
+                                                  "/usr/bin", "/bin", "/usr/sbin", "/sbin"])),
+            "HOME": home, "LANG": "en_US.UTF-8", "ENACT_AGENT_BUILD": "1",
+            "ENACT_AGENT_BUILD_ID": provenance["forkCommit"] + ("-dirty" if provenance["forkWorkingTreeDirty"] else ""),
+            "CARGO_TARGET_DIR": str(OUT / "cargo-native"), "RUSTC": rustc,
+            "CARGO_ENCODED_RUSTFLAGS": f"--remap-path-prefix={home}={PUBLIC_BUILD_HOME}"}
+
+
+def require_private_home_absent(binary, home):
+    try:
+        canonical_home = Path(home).resolve()
+    except (OSError, RuntimeError):
+        raise RuntimeError("Cannot establish private build-home path guard; publication refused") from None
+    contents = binary.read_bytes()
+    if any(path in contents for path in {os.fsencode(home), os.fsencode(canonical_home)}):
+        raise RuntimeError("Release binary contains the private build-home path; publication refused")
+
+
 def native(brand, cargo, rustc, output_dir, committed=False, expected_commit=None):
     """Build a headless release with native local RPC, without web/channels."""
     source_digest = source_fingerprint(SOURCE)
@@ -501,16 +525,15 @@ def native(brand, cargo, rustc, output_dir, committed=False, expected_commit=Non
     if committed and not (target.endswith("-apple-darwin") or "-linux-" in target):
         raise RuntimeError(f"Headless distribution releases currently require native macOS or Linux, got {target}")
     # Keep provider credentials and arbitrary compiler overrides out of Cargo.
-    env = {"PATH": os.pathsep.join(dict.fromkeys([str(Path(cargo).parent), str(Path(rustc).parent),
-                                                 "/usr/bin", "/bin", "/usr/sbin", "/sbin"])),
-           "HOME": os.environ["HOME"], "LANG": "en_US.UTF-8", "ENACT_AGENT_BUILD": "1",
-           "ENACT_AGENT_BUILD_ID": provenance["forkCommit"] + ("-dirty" if provenance["forkWorkingTreeDirty"] else ""),
-           "CARGO_TARGET_DIR": str(OUT / "cargo-native"), "RUSTC": rustc}
+    env = native_build_environment(cargo, rustc, provenance)
     run(cargo, "build", "--locked", *(["--offline"] if committed else []), "--release", "--no-default-features",
         "--features", "agent-runtime", "--target", target, "--bin", "zeroclaw", cwd=SOURCE, env=env)
     binary = destination / brand["command"]
     staged = destination / ".enact-agent-new"
-    shutil.copy2(OUT / "cargo-native" / target / "release/zeroclaw", staged)
+    compiled = OUT / "cargo-native" / target / "release/zeroclaw"
+    if committed:
+        require_private_home_absent(compiled, env["HOME"])
+    shutil.copy2(compiled, staged)
     staged.replace(binary)
     version_output = subprocess.check_output([str(binary), "--version"], text=True).strip()
     version = version_output.split()[1]
@@ -548,10 +571,22 @@ def native(brand, cargo, rustc, output_dir, committed=False, expected_commit=Non
         "distribution": {"version": release["version"], "tag": f"{brand['command']}-v{release['version']}"},
         "source": provenance,
         "manifestSha256": hashlib.sha256((destination / "manifest.json").read_bytes()).hexdigest(),
-        "build": {"defaultFeatures": False, "features": ["agent-runtime"]},
+        "build": {"defaultFeatures": False, "features": ["agent-runtime"],
+                  "pathRemapping": {"from": "$HOME", "to": PUBLIC_BUILD_HOME,
+                                    "privateHomeScan": "passed" if committed else "not-run"}},
     }, indent=2) + "\n")
     print(f"Built headless native artifact: {destination}")
     return metadata
+
+
+def public_tar_member(member):
+    """Exclude builder account identity from published archive metadata."""
+    member.uid = member.gid = 0
+    member.uname = member.gname = ""
+    for key in ("uid", "gid", "uname", "gname", "SCHILY.uid", "SCHILY.gid",
+                "SCHILY.uname", "SCHILY.gname"):
+        member.pax_headers.pop(key, None)
+    return member
 
 
 def package_native_release(brand, artifact, output):
@@ -595,7 +630,7 @@ def package_native_release(brand, artifact, output):
         for path in files))
     archive = output / f"{stem}.tar.gz"
     with tarfile.open(archive, "w:gz") as stream:
-        stream.add(artifact, arcname=stem)
+        stream.add(artifact, arcname=stem, filter=public_tar_member)
     (output / "SHA256SUMS").write_text(f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n")
     print(f"Packaged headless release: {archive}")
     return archive
@@ -618,7 +653,7 @@ def package(brand):
     )
     archive = OUT / f"{brand['command']}-{os.uname().sysname.lower()}-{os.uname().machine}.tar.gz"
     with tarfile.open(archive, "w:gz") as tar:
-        tar.add(package_dir, arcname=brand["command"])
+        tar.add(package_dir, arcname=brand["command"], filter=public_tar_member)
     print(f"Packaged: {archive}")
 
 
