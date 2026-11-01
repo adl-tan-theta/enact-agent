@@ -25,7 +25,7 @@
 let
   # Keep in sync with the workspace version (`Cargo.toml [workspace.package]`)
   # and the Rust packages in `flake.nix`.
-  version = "0.8.6";
+  version = "0.8.7";
 
   cargoLock = {
     lockFile = ../Cargo.lock;
@@ -86,6 +86,10 @@ in
     npmConfigHook = importNpmLock.npmConfigHook;
 
     preBuild = ''
+      # The Enact overlay is shared with CLI/desktop packaging and lives
+      # outside web/. Restore its relative location in this web-only source.
+      mkdir -p ../overlays/enact
+      cp ${../overlays/enact/brand.json} ../overlays/enact/brand.json
       cp ${openapiSpec}/api-descriptions.ts src/lib/api-descriptions.ts
       cp ${openapiSpec}/api-enums.ts src/lib/api-enums.ts
       npx --no-install openapi-typescript ${openapiSpec}/openapi.json \

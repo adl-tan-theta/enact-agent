@@ -1,0 +1,58 @@
+name: Enact Agent native build
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15-intel, macos-15]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.12'
+      - name: Build committed source and qualify extracted archive
+        run: |
+          set -euo pipefail
+          git remote rename origin enact
+          git remote add origin https://github.com/zeroclaw-labs/zeroclaw.git
+          python_bin="$(command -v python)"
+          test -x "$python_bin"
+          msrv="$("$python_bin" -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["rust-version"])')"
+          [[ "$msrv" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          rustup toolchain install "$msrv" --profile minimal --component rustfmt
+          rustup default "$msrv"
+          cargo_bin="$(rustup which cargo)"
+          rustc_bin="$(rustup which rustc)"
+          printf 'Python executable: %s\n' "$python_bin"
+          "$python_bin" --version
+          "$cargo_bin" --version
+          "$rustc_bin" --version
+          env -i HOME="$HOME" PATH="$PATH" LANG=C.UTF-8 "$cargo_bin" fetch --locked
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          output="$RUNNER_TEMP/enact-release"
+          env -i HOME="$HOME" PATH="$PATH" LANG=C.UTF-8 "$python_bin" -B overlays/enact/build.py release --cargo "$cargo_bin" --rustc "$rustc_bin" --output-dir "$output"
+          archives=("$output"/*.tar.gz)
+          test "${#archives[@]}" -eq 1
+          mkdir "$RUNNER_TEMP/enact-extracted"
+          tar -xzf "${archives[0]}" -C "$RUNNER_TEMP/enact-extracted"
+          payload="$(find "$RUNNER_TEMP/enact-extracted" -type f -name enact-agent)"
+          env -i HOME="$HOME" PATH="$PATH" LANG=C.UTF-8 "$python_bin" -B overlays/enact/probe_native.py --binary "$payload"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: enact-agent-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/enact-release/*.tar.gz
+            ${{ runner.temp }}/enact-release/SHA256SUMS
+          if-no-files-found: error

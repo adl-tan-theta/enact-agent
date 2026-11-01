@@ -2,6 +2,9 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
+import { readFileSync } from "node:fs";
+
+const brand = JSON.parse(readFileSync(new URL("../overlays/enact/brand.json", import.meta.url), "utf8"));
 
 const gatewayHost = process.env.ZEROCLAW_GATEWAY_HOST ?? "127.0.0.1";
 const gatewayPort = process.env.ZEROCLAW_GATEWAY_PORT ?? "42617";
@@ -17,6 +20,15 @@ const allowedHosts = process.env.ZEROCLAW_WEB_ALLOWED_HOSTS
 export default defineConfig(({ command }) => ({
   base: command === "serve" ? "/" : "/_app/",
   plugins: [
+    {
+      name: "enact-brand-html",
+      transformIndexHtml: {
+        order: "pre",
+        handler(html) {
+          return html.replaceAll("%ENACT_NAME%", brand.name).replaceAll("%ENACT_LOGO%", brand.logo).replaceAll("%ENACT_LOGO_DARK%", brand.logoDark);
+        },
+      },
+    },
     react(),
     tailwindcss(),
     // Dev-only: the production gateway serves static assets under `/_app/*` by

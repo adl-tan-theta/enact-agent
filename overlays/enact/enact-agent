@@ -1,0 +1,13 @@
+#!/bin/sh
+# Installed alongside the branded kernel; also usable from the source checkout.
+set -eu
+launcher_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -x "$launcher_dir/zeroclaw" ]; then
+    exec "$launcher_dir/zeroclaw" "$@"
+fi
+kernel="$launcher_dir/../../target/enact/bin/zeroclaw"
+if [ ! -x "$kernel" ]; then
+    printf '%s\n' 'Enact Agent has not been built. Run: python3 overlays/enact/build.py build' >&2
+    exit 1
+fi
+exec "$kernel" "$@"

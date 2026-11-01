@@ -64,3 +64,11 @@ Use `./dev/ci.sh all` for full pre-PR validation when the scope warrants it. Doc
 ## Task References
 
 The architecture map routes task-specific documentation. Consult `docs/book/src/contributing/agent-guidelines.md` only for detailed agent examples, risk and stability policy, skill discovery, and protected operational documents. Do not skip a required contract because it is no longer embedded in this bootstrap file.
+
+## Enact Fork Overlay
+
+For any Enact-specific fork, native runtime, web branding, release, installation,
+or upstream synchronization work, you must also read
+[`overlays/enact/AGENTS.md`](overlays/enact/AGENTS.md) before editing or running
+build/release commands. That contract supplements all upstream instructions
+above; it does not replace or relax them.
