@@ -13,7 +13,7 @@ remain intact.
 `brand.json` defines the display name, command, accent and canonical light/dark
 logo files. `release.json` pins the upstream source base, fork repository,
 distribution version. The compiler host determines the artifact target. The distribution tag
-`enact-agent-v0.8.6-enact.2` is separate from the upstream binary version `0.8.6`.
+`enact-agent-v0.8.7-enact.1` is separate from the upstream binary version `0.8.7`.
 
 ## Apple Silicon headless release
 
@@ -42,9 +42,9 @@ before packaging if the resulting binary still contains the actual build HOME
 path. `RELEASE.json` records this policy without recording the private path.
 Archive owner IDs/names and ownership PAX fields are normalized.
 
-Output is under `target/enact/releases/enact-agent-v0.8.6-enact.2/`:
+Output is under `target/enact/releases/enact-agent-v0.8.7-enact.1/`:
 
-- `enact-agent-v0.8.6-enact.2-aarch64-apple-darwin.tar.gz` and its `SHA256SUMS`.
+- `enact-agent-v0.8.7-enact.1-aarch64-apple-darwin.tar.gz` and its `SHA256SUMS`.
 - An unpacked `enact-agent/` directory for local qualification.
 
 The archive contains the executable, `manifest.json`, `RELEASE.json`, both upstream licenses,
@@ -68,7 +68,7 @@ Qualify the unpacked executable without real provider credentials or paid calls:
 
 ```sh
 python3 -B overlays/enact/probe_native.py \
-  --binary target/enact/releases/enact-agent-v0.8.6-enact.2/enact-agent/enact-agent
+  --binary target/enact/releases/enact-agent-v0.8.7-enact.1/enact-agent/enact-agent
 ```
 
 The fixture exercises local RPC, constructed MCP inventory, approval rejection,

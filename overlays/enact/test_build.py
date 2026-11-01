@@ -186,8 +186,10 @@ class ReleaseTests(unittest.TestCase):
             metadata = {"binary": {"sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
                                    "sizeBytes": binary.stat().st_size, "target": "aarch64-apple-darwin"}}
             (artifact / "manifest.json").write_text(json.dumps(metadata))
+            release = build.release_manifest()
             (artifact / "RELEASE.json").write_text(json.dumps({
-                "distribution": {"version": "0.8.6-enact.2", "tag": "enact-agent-v0.8.6-enact.2"},
+                "distribution": {"version": release["version"],
+                                 "tag": f"{brand['command']}-v{release['version']}"},
                 "manifestSha256": hashlib.sha256((artifact / "manifest.json").read_bytes()).hexdigest()}))
             source = root / "source"
             (source / "web/public").mkdir(parents=True)

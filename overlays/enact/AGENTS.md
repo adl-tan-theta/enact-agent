@@ -21,7 +21,7 @@ Read the relevant owner before changing behavior or documenting a claim.
 | [web branding helper](../../web/src/lib/branding.ts) and `web/public/enact-logo*.svg` | Dashboard presentation and canonical vector assets |
 
 Use [README.md](README.md) for optional dashboard/desktop build prerequisites.
-Use the [public release](https://github.com/adl-tan-theta/enact-agent/releases/tag/enact-agent-v0.8.6-enact.2)
+Use the [public release](https://github.com/adl-tan-theta/enact-agent/releases/tag/enact-agent-v0.8.7-enact.1)
 for published asset availability and checksums. Do not treat a local build or a
 successful compile as proof that a release asset exists or passes its fixture.
 
@@ -52,8 +52,9 @@ successful compile as proof that a release asset exists or passes its fixture.
   local endpoints and no paid calls.
 - Stop on drift or failed checks; never silently skip transformations, weaken
   guards, or substitute an older binary. Keep source, privacy and attribution checks.
-- Never overwrite release bytes or move published tags. `.1` remains withdrawn;
-  do not install or republish it. Changed artifacts require a new version/tag.
+- Never overwrite release bytes or move published tags. `0.8.6-enact.1` remains
+  withdrawn; do not install or republish it. Changed artifacts require a new
+  version/tag.
 
 Upstream may change. There is no guarantee that future merges cannot break the
 fork. Checked single-match anchors and constructor counts fail closed on known
@@ -62,15 +63,16 @@ until reviewed adaptation and target requalification pass.
 
 ## Install the published headless release
 
-Release `0.8.6-enact.2` has qualified native archives for:
+Release `0.8.7-enact.1` has qualified native archives for:
 
 - Apple Silicon macOS: `aarch64-apple-darwin`.
 - Intel macOS: `x86_64-apple-darwin`.
 - Linux x64: `x86_64-unknown-linux-gnu`.
 
-All three use fork source `9efc7c87adfb8d3049d11fa983cf1d401532e47c` and passed
-native extracted-archive fixtures and independent archive review. Other targets
-are unqualified. Later docs commits do not change these binaries' provenance.
+All three use fork source `c99096a8b9e8c50726b72a032553f7727babfa6c` on upstream
+base `1c1cd118ac536a1dd1bc79b9cce69cbdc04e4f29` and passed native
+extracted-archive fixtures. Other targets are unqualified. Later docs commits do
+not change these binaries' provenance.
 
 Prebuilt installation needs `curl`, `tar` and `shasum` (macOS) or `sha256sum`
 (Linux). It needs no npm, Cargo, Rust, Nix or provider credentials. Use a new
@@ -84,14 +86,14 @@ case "$(uname -s):$(uname -m)" in
   Linux:x86_64) target=x86_64-unknown-linux-gnu ;;
   *) printf '%s\n' 'No qualified archive for this operating system/CPU.' >&2; exit 1 ;;
 esac
-version=0.8.6-enact.2
-tag=enact-agent-v0.8.6-enact.2
+version=0.8.7-enact.1
+tag=enact-agent-v0.8.7-enact.1
 archive="$tag-$target.tar.gz"
 mkdir "enact-agent-$version-download"
 cd "enact-agent-$version-download"
 base="https://github.com/adl-tan-theta/enact-agent/releases/download/$tag"
 curl --fail --location --output "$archive" "$base/$archive"
-curl --fail --location --output SHA256SUMS "$base/SHA256SUMS-0.8.6-enact.2"
+curl --fail --location --output SHA256SUMS "$base/SHA256SUMS-0.8.7-enact.1"
 awk -v file="$archive" '$2 == file { print; count++ } END { if (count != 1) exit 1 }' SHA256SUMS > SELECTED-SHA256SUMS
 case "$(uname -s)" in
   Darwin) shasum -a 256 -c SELECTED-SHA256SUMS ;;
@@ -111,12 +113,12 @@ ln -sfn "$HOME/.local/share/enact-agent/$version/enact-agent" "$HOME/.local/bin/
 "$HOME/.local/bin/enact-agent" --help
 ```
 
-The versioned outer asset `SHA256SUMS-0.8.6-enact.2` verifies archives; the inner
+The versioned outer asset `SHA256SUMS-0.8.7-enact.1` verifies archives; the inner
 `SHA256SUMS` verifies payload files. Preserve all 11 files: executable,
 `manifest.json`, `RELEASE.json`, both licenses, `NOTICE`, `UPSTREAM.txt`,
 `INSTALL.txt`, both `branding/` SVGs and inner checksums. Do not copy only the
 binary. The launcher replacement needs no root access; retain an older verified
-installation for rollback, except withdrawn `.1`.
+installation for rollback, except withdrawn `0.8.6-enact.1`.
 
 These headless archives contain no dashboard/desktop app, notarization or GitHub
 build attestation. Checksums establish integrity, not publisher identity. Do not
@@ -134,7 +136,7 @@ while retaining both repositories:
 git clone --origin enact --branch enact/branding https://github.com/adl-tan-theta/enact-agent.git enact-agent-source
 cd enact-agent-source
 git remote add origin https://github.com/zeroclaw-labs/zeroclaw.git
-git switch --create enact/release-0.8.6-enact.2 9efc7c87adfb8d3049d11fa983cf1d401532e47c
+git switch --create enact/release-0.8.7-enact.1 c99096a8b9e8c50726b72a032553f7727babfa6c
 git remote get-url origin
 git remote get-url enact
 ```
@@ -179,7 +181,7 @@ upstream_base="$(python3 -c 'import json; print(json.load(open("overlays/enact/r
 git diff --exit-code "$upstream_base" -- src crates Cargo.toml Cargo.lock
 ```
 
-This check is clean for the published `.2` source. Stop review on unexpected
+This check is clean for the published `.1` source. Stop review on unexpected
 fork-only core differences; investigate rather than rewriting files automatically.
 
 ## Validation and release gate
