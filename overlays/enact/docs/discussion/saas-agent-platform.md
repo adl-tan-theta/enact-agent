@@ -409,3 +409,38 @@ mailbox-only agent cannot call revenue tools.
    sandboxed agents?
 6. Build it in Rust from the start, or prototype in TypeScript against the
    existing relay and port after the schema settles?
+
+## 16. Update: workspace as isolation boundary, durable sandboxes
+
+Owner-stated deployment facts, recorded 2026-11-03. Not verified here.
+
+- **One sandbox is one workspace, not one agent.** The workspace is the isolation
+  boundary. Agents working in the same workspace share a sandbox.
+- **Sandboxes are durable** (Azure), not ephemeral. They keep state between
+  sessions.
+
+Effects on earlier sections:
+
+- Section 14 recommended one sandbox per team or task. A workspace-per-sandbox
+  boundary is the same idea with a different unit. The per-agent mitigations still
+  apply inside a shared workspace: separate unix user or `$HOME` per agent so
+  credentials are not shared, one git worktree per agent, per-agent cgroup limits,
+  and per-agent identity in the audit log.
+- Durable sandboxes make the credential point sharper. Secrets written to disk in
+  a durable sandbox persist, so inject them per process and avoid writing them to
+  `$HOME`, or revoke and rotate them when a session ends.
+- Durable state also means agent memory, SOP run state (`sop.persist_runs`) and
+  session data can live in the sandbox. Decide what is stored in the sandbox
+  versus the platform database, and how a sandbox is backed up, migrated and
+  deleted.
+- The mailbox in section 15 still applies for passing data between workspaces.
+  Within one workspace, agents can also share files, but the mailbox keeps
+  message history, attribution and approvals in one auditable place.
+- Peer groups and channel configuration live in each sandbox's config. With many
+  workspaces, decide how that config is provisioned and updated.
+
+Open questions:
+
+1. How does a durable sandbox receive and rotate its scoped credential?
+2. What is the lifecycle: suspend, resume, snapshot, delete?
+3. Is the agent daemon long-running inside the sandbox, or started per request?
