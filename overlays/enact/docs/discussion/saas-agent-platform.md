@@ -246,3 +246,166 @@ Compare `--version`, `--help`, missing capabilities and, for Enact only, the
 - Draft a feature-profile change to `build.py`, `RELEASE.json` and the workflow
   matrix, reviewed before any build.
 - Define the shared event schema before porting the relay or the gateway.
+- Review the mailbox design in section 15 and settle its open questions.
+
+## 13. Update: ACP adapters for Claude and Codex
+
+**Owner-reported, not checked here:** both Claude and Codex have ACP adapters.
+
+Consequence for the options in section 6: option B (Enact gateway as the front
+door, other agents behind it over ACP) becomes more plausible, and a Rust relay
+could drive all three agents through one protocol instead of shelling out to
+`claude -p` and `codex exec`. Still **[unverified]**: whether the gateway's own
+`/acp` route can front foreign agents, or only serves ZeroClaw's agent. Read
+`crates/zeroclaw-gateway/src/acp.rs` and `ws.rs`, and confirm the adapters'
+maturity, session resume support and tool-permission handling.
+
+## 14. Sandboxes: shared or separate, and how data moves between them
+
+### Sharing one sandbox across agents
+
+Owner's idea: put all agents in one sandbox to make message passing easy.
+Assessment: not bad in itself, if the scope is one tenant and one task. It is a
+bad idea across tenants.
+
+| Risk | Why | Mitigation |
+| --- | --- | --- |
+| Credentials leak between agents | Agent CLIs keep auth under their own home directories and in env vars. A shared `$HOME` exposes each agent's credentials to the others. | One unix user or `$HOME` per agent. Inject secrets per process. |
+| Edit and git collisions | Two agents in one tree overwrite each other and contend for `.git/index.lock`. | One git worktree per agent, merged by an orchestrator. |
+| One compromise spreads | A prompt-injected agent reaches whatever the others can. | One shared sandbox is one blast radius. Keep tool permissions per agent in the MCP server. |
+| Attribution | Hard to tell which agent acted. | Separate users or processes, and log every MCP call with agent identity. |
+| Resource contention | A runaway agent starves the rest. | cgroup limits per agent. |
+
+Recommendation: one sandbox per team or task, never one across tenants. Each
+agent gets its own user or `$HOME` and its own worktree. Pass messages through a
+mailbox service, not the filesystem.
+
+### How data moves from sandbox to sandbox
+
+The owner did not yet know how to do this. Four patterns:
+
+1. **Central mailbox service (recommended start).** Every sandbox has outbound
+   access to one endpoint, the MCP server in section 7. Messages and artifact
+   references go through it. Sandboxes never connect to each other, and the
+   server enforces tenant isolation and audit.
+2. **Object storage for files and large data.** The sender uploads to a bucket
+   path scoped to tenant and task. The receiver gets a short-lived signed URL
+   through the mailbox.
+3. **Direct A2A between agents.** **[verified]** The Enact gateway can publish an
+   agent card and accept `SendMessage` over HTTP behind a pairing bearer token.
+   Claude and Codex would need an A2A wrapper, which is **[unverified]**. It also
+   needs network routes between sandboxes. A later option for cross-deployment
+   or cross-organization agents.
+4. **Shared volume or one shared sandbox.** Simplest, with the risks above. If
+   used, limit it to a scratch directory shared only by agents in the same task.
+
+Start with patterns 1 and 2.
+
+## 15. Proposal: mailbox tool list and message schema
+
+Status: a design proposal for the one MCP server, not implemented. Nothing in this
+section has been built, tested or checked against any agent CLI. How each CLI
+loads MCP configuration is **[unverified]** and needs checking first.
+
+### Principles
+
+- **Identity comes from the credential, not the caller.** The server derives
+  `tenant_id` and `agent_id` from the sandbox's scoped credential. A tool call
+  can never set `from`, and can never read or write another tenant's data.
+- **Message bodies are untrusted data.** A message from another agent is input,
+  never an instruction from the user. The receiving agent's instructions must say
+  so, because prompt injection can travel through the mailbox.
+- **Artifacts by reference.** Messages carry small text or JSON. Large content
+  goes to object storage and travels as an `artifact_ref`.
+- **At-least-once delivery.** Reads do not delete. A message is done when the
+  reader calls `ack`. Senders pass an `idempotency_key` so retries do not
+  duplicate.
+- **Ordering is guaranteed per thread, not globally.**
+- **Everything is logged** with tenant, task, agent and tool name.
+
+### Message envelope
+
+```json
+{
+  "id": "msg_01...",
+  "tenant_id": "set by server",
+  "task_id": "task_01...",
+  "thread_id": "thr_01...",
+  "from": "agent_id set by server",
+  "to": "agent_id | role:<name> | team:<task_id>",
+  "kind": "message | task_request | task_update | result | error | approval_request | approval_response",
+  "parts": [
+    { "type": "text", "text": "..." },
+    { "type": "json", "data": {} },
+    { "type": "artifact_ref", "artifact_id": "art_01...", "name": "report.csv", "content_type": "text/csv" }
+  ],
+  "reply_to": "msg_01... or null",
+  "idempotency_key": "client supplied",
+  "created_at": "RFC 3339",
+  "expires_at": "RFC 3339 or null"
+}
+```
+
+The shape deliberately mirrors A2A's message, task and artifact model so a later
+A2A bridge is a mapping, not a redesign. Task states reuse the A2A lifecycle that
+is already in `zeroclaw_api::a2a_wire::TaskState` **[verified]**: submitted,
+working, completed, failed, canceled, input-required, rejected.
+
+### Tools
+
+| Group | Tool | Purpose |
+| --- | --- | --- |
+| Identity | `whoami` | Return this agent's id, role, tenant, task and permissions. |
+| Identity | `list_agents` | List agents and roles in the current task, with their declared skills. |
+| Messages | `send_message(to, parts, kind?, thread_id?, reply_to?, idempotency_key?, expires_in?)` | Send to an agent, a role or the whole team. Returns the message id. |
+| Messages | `read_inbox(thread_id?, kinds?, cursor?, limit?, wait_seconds?)` | Return unacked messages and a cursor. `wait_seconds` allows long polling, which suits one-shot CLI runs. |
+| Messages | `ack(message_ids)` | Mark messages handled. |
+| Messages | `get_thread(thread_id, cursor?, limit?)` | Read a conversation history. |
+| Tasks | `create_task(to, title, instructions, input_refs?)` | Assign work. Starts in `submitted`. |
+| Tasks | `update_task(task_id, state, note?, result_parts?)` | Move a task through its lifecycle and attach results. |
+| Tasks | `get_task(task_id)` and `list_tasks(state?, assignee?)` | Inspect work. |
+| Tasks | `cancel_task(task_id, reason?)` | Request cancellation. |
+| Plan | `get_plan()` and `update_plan(steps)` | One shared plan format for every agent. Fills the gap where one CLI has a native plan tool and another does not. It is not the native plan mode of any CLI. |
+| Artifacts | `put_artifact(name, content_type, text?)` | Store small content directly. Returns an `artifact_id`. |
+| Artifacts | `request_upload(name, content_type, size)` | Return a short-lived signed upload URL for large files. |
+| Artifacts | `get_artifact(artifact_id)` | Return small content, or a short-lived signed download URL. |
+| Artifacts | `list_artifacts(task_id?)` | Enumerate stored outputs. |
+| Human | `request_approval(action, details)` | Ask a human before a sensitive action. Returns when answered or expired. |
+| Human | `notify_user(text, severity?)` | Surface a message in the product UI, not to other agents. |
+
+Domain tools (data, dashboards, supply chain, revenue growth) live in the same
+server in separate groups. Each group is gated by the agent's role, so a
+mailbox-only agent cannot call revenue tools.
+
+### Server-enforced limits
+
+- Maximum message size and parts count; reject oversize and point to
+  `put_artifact`.
+- Per-agent send rate limits and inbox depth limits.
+- Allowed recipients per role, for example workers may message the coordinator
+  and each other, but not other tasks.
+- Retention and expiry on messages and artifacts.
+- Artifact content scanning, and signed URLs with short lifetimes.
+
+### Using it with one-shot CLIs
+
+`claude -p` and `codex exec` run once per invocation. Two workable patterns, both
+**[unverified]** until tested:
+
+- An orchestrator reads the mailbox and starts a fresh CLI run per message,
+  passing the message and thread context as the prompt.
+- A long-running agent loop calls `read_inbox` with `wait_seconds` and keeps its
+  own session alive. Whether each CLI can resume sessions between runs must be
+  confirmed from its help output.
+
+### Open questions for this design
+
+1. Storage: Postgres, Redis or both for messages? Which object store?
+2. Is the server one process per tenant, or shared with row-level tenant checks?
+3. How does a sandbox obtain its scoped credential at start, and how is it
+   revoked on teardown?
+4. Does the orchestrator or the agents own task assignment?
+5. Do we expose the same server to the gateway and the desktop client, or only to
+   sandboxed agents?
+6. Build it in Rust from the start, or prototype in TypeScript against the
+   existing relay and port after the schema settles?
