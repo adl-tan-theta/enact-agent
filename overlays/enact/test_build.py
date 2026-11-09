@@ -88,6 +88,7 @@ class SessionToolsProjectionTests(unittest.TestCase):
             handler = dispatch.split('    async fn handle_session_tools(', 1)[1].split(
                 '    async fn handle_session_state(', 1)[0]
             for guard in ('authorize_session_owner', 'capture_session_access',
+                          'recheck_authority_after_admission', 'scoped_principal_id_from',
                           'revalidate_admitted_session', 'ensure_session_incarnation'):
                 self.assertIn(guard, handler)
             self.assertIn('agent.tool_names()', handler)

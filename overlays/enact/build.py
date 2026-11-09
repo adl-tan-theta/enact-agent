@@ -424,7 +424,14 @@ def project_session_tools(source):
             let agent = agent.lock().await;
             agent.tool_names().into_iter().map(str::to_string).collect()
         };
-        self.revalidate_admitted_session(&req.session_id, authorized.as_ref()).await?;
+        let grants = self.recheck_authority_after_admission(Method::SessionTools)?;
+        let scope = self.scoped_principal_id_from(grants.as_ref());
+        self.revalidate_admitted_session(
+            &req.session_id,
+            authorized.as_ref(),
+            scope.as_deref(),
+        )
+        .await?;
         self.ensure_session_incarnation(&req.session_id, expected_generation).await?;
         to_result(SessionToolsResult { session_id: req.session_id, tools })
     }
