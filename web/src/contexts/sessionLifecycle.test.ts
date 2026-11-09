@@ -1006,6 +1006,50 @@ test('session switch disconnects both the effect-owned and replacement sockets',
   await unmount(mounted.renderer);
 });
 
+test('a socket closed mid-turn stops the turn and reloads the transcript when it reopens', async () => {
+  const runtime = new FakeSessionRuntime();
+  const mounted = await mountChat(runtime);
+  await openSocket(runtime, 0);
+  await settle();
+  await act(async () => { mounted.context().sendMessage('hello'); });
+  assert.equal(mounted.context().typing, true);
+
+  // The session ends mid-turn (4401); the turn finishes on the server.
+  runtime.queueMessages('A', () => Promise.resolve({
+    session_id: 'A',
+    session_persistence: true,
+    messages: [
+      { role: 'user', content: 'hello', created_at: null },
+      { role: 'assistant', content: 'finished while away', created_at: null },
+    ],
+  }));
+  const callsBefore = runtime.messageCalls.length;
+  await act(async () => { runtime.sockets[0]!.emitClose(4401); });
+  assert.equal(mounted.context().typing, false);
+  // A session close code is the auth layer's to explain, not a config error.
+  assert.equal(mounted.context().error, null);
+
+  // The client reconnects (after re-auth) and the transcript catches up.
+  await openSocket(runtime, 0);
+  await settle();
+  assert.equal(runtime.messageCalls.length, callsBefore + 1);
+  assert.ok(mounted.context().messages.some((m) => m.content === 'finished while away'));
+  await unmount(mounted.renderer);
+});
+
+test('a socket closed while idle reconnects without reloading the transcript', async () => {
+  const runtime = new FakeSessionRuntime();
+  const mounted = await mountChat(runtime);
+  await openSocket(runtime, 0);
+  await settle();
+  const callsBefore = runtime.messageCalls.length;
+  await act(async () => { runtime.sockets[0]!.emitClose(1001); });
+  await openSocket(runtime, 0);
+  await settle();
+  assert.equal(runtime.messageCalls.length, callsBefore);
+  await unmount(mounted.renderer);
+});
+
 test('F5 while a detached turn is still running keeps the prompt the browser already showed', async () => {
   // First page load: conversation A is empty on the server.
   const runtime1 = new FakeSessionRuntime();
@@ -1276,3 +1320,43 @@ test('known limit: a conversation deleted elsewhere keeps its last exchange in t
   assert.deepEqual(second.context().messages.map((m) => m.content), ['two', 'answer two']);
   await unmount(second.renderer);
 });
+
+// The live Thinking box's `open` prop: controlled by the stream by default,
+// handed to the reader (`undefined`) when "Keep thinking collapsed" is on.
+const thinkingBoxCases = [
+  { keepCollapsed: false, label: 'follows the stream', whileThinking: true, afterChunk: false },
+  { keepCollapsed: true, label: 'is left to the reader', whileThinking: undefined, afterChunk: undefined },
+];
+for (const { keepCollapsed, label, whileThinking, afterChunk } of thinkingBoxCases) {
+  test(`live Thinking box ${label} (keep collapsed ${keepCollapsed ? 'on' : 'off'})`, async () => {
+    const runtime = new FakeSessionRuntime();
+    runtime.queueMessages('A', () => Promise.resolve(messagesResponse('A', true, ['earlier'])));
+    const mounted = await mountChat(runtime, true);
+    await openSocket(runtime, 0);
+    await settle();
+
+    const toggle = () => mounted.renderer.root.findAllByType('button')
+      .find((button) => nodeText(button).includes('Keep thinking collapsed'));
+    assert.equal(toggle()?.props['aria-pressed'], false);
+    if (keepCollapsed) {
+      await act(async () => { toggle()!.props.onClick(); });
+      assert.equal(toggle()?.props['aria-pressed'], true);
+      assert.equal(storage.getItem('zeroclaw_keep_thinking_collapsed'), '1');
+    }
+
+    const liveOpen = () => {
+      const boxes = mounted.renderer.root.findAllByType('details');
+      assert.equal(boxes.length, 1);
+      return boxes[0]!.props.open;
+    };
+    await act(async () => {
+      runtime.sockets[0]!.emitMessage({ type: 'thinking', content: 'weighing it up' });
+    });
+    assert.equal(liveOpen(), whileThinking);
+    await act(async () => {
+      runtime.sockets[0]!.emitMessage({ type: 'chunk', content: 'The answer' });
+    });
+    assert.equal(liveOpen(), afterChunk);
+    await unmount(mounted.renderer);
+  });
+}

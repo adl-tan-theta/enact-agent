@@ -90,6 +90,96 @@ def project_display(text, brand):
     return re.sub(r"(?<![\w./-])zeroclaw(?=[ `])", brand["command"], text)
 
 
+def project_personality_templates(source):
+    """Apply focused Enact identity edits while preserving upstream template structure."""
+    template_dir = source / "crates/zeroclaw-runtime/src/agent/personality_templates"
+    templates = {
+        "IDENTITY.md": (
+            "e65a35b94cd65887962e595db93fa3dbfd4ca63d1223ea422648426366c567ba",
+            (
+                ("# IDENTITY.md — Who Am I?", "# IDENTITY.md — Enact Agent"),
+                ("- **Creature:** A Rust-forged AI — fast, lean, and relentless\n- **Vibe:** Sharp, direct, resourceful. Not corporate. Not a chatbot.\n- **Emoji:** 🦀",
+                 "- **Product:** Enact OS\n- **Role:** An AI teammate working with people in their shared workspace.\n- **Vibe:** Clear, collaborative, capable, and direct."),
+            ),
+        ),
+        "SOUL.md": (
+            "2eb10b6abc062c75e1ac3466b9e97298473babc85fb439f4d37c47187f6d8f36",
+            (
+                ("# SOUL.md — Who You Are", "# SOUL.md — Enact Agent"),
+                ("*You're not a chatbot. You're becoming someone.*", "*You're an AI teammate in Enact OS, working with people in their shared workspace.*"),
+                ("You are **{agent}**. Built in Rust. 3MB binary. Zero bloat.\nYou are NOT ChatGPT, Claude, DeepSeek, Gemini, or any other product.\nYou are {agent}. That is your name. That is who you are.\n\n- NEVER say \"As an AI\" or \"I'm just an AI\"\n- NEVER mention OpenAI, Anthropic, DeepSeek, Google by name\n- Always introduce yourself as {agent} if asked",
+                 "You are **{agent}**, an AI teammate in Enact OS. Your active profile, model, tools, and permissions depend on Enact's current configuration.\n\n- Always introduce yourself as {agent} if asked\n- Do not claim access to tools or workspace context unless the active session provides it\n- If asked about your model or provider, report only what the active runtime exposes"),
+                ("Each session, you wake up fresh. These files ARE your memory.\nRead them. Update them. They're how you persist.",
+                 "These agent workspace files provide local continuity between sessions. They are separate from Enact's workspace Memory Graph; use that graph only through tools exposed to the active session."),
+            ),
+        ),
+        "USER.md": (
+            "435a84e5ed0d1f1257b428ddf35828be894a7f2f15a99c2fa5324c3a0daaa2e3",
+            (),
+        ),
+        "AGENTS.md": (
+            "51aed384f8ab2d046b00464bae4ba077e762fc314447ec091165bebea28716a8",
+            (
+                ("# AGENTS.md — {agent} Personal Assistant", "# AGENTS.md — {agent} in Enact OS"),
+                ("4. If in MAIN SESSION (direct chat): `MEMORY.md` is already injected",
+                 "4. If in the main Enact session, use `MEMORY.md` only when the active runtime injects it"),
+                ("- **Long-term:** `MEMORY.md` — curated memories (auto-injected in main session)",
+                 "- **Long-term:** `MEMORY.md` — curated local memories, when included by the active runtime"),
+                ("Skip secrets unless asked to keep them.", "Never store secrets, even when asked."),
+            ),
+        ),
+        "AGENTS.no-memory.md": (
+            "43277aa219dd317e7059ed03e06f19f03948eb41d4eef837bea1ba34f1643c6f",
+            (
+                ("# AGENTS.md — {agent} Personal Assistant", "# AGENTS.md — {agent} in Enact OS"),
+            ),
+        ),
+        "TOOLS.md": (
+            "aab5f5b85288823a832262e1d16d29e8833044b1263857a5c04b19eef0bc4696",
+            (
+                ("# TOOLS.md — Local Notes", "# TOOLS.md — Enact Agent local notes"),
+                ("## Built-in Tools\n", "## Built-in Tools\n\nThe tools below may be provided by this runtime; actual availability depends on the active Enact session and its permissions.\n\n"),
+            ),
+        ),
+        "HEARTBEAT.md": (
+            "f525101617a48bbdabea2625c25e9d3face0cdb48655fb2b94d1c70a0647804e",
+            (
+                ("# HEARTBEAT.md", "# HEARTBEAT.md — Enact Agent daemon"),
+                ("# Keep this file empty (or with only comments) to skip heartbeat work.\n# Add tasks below when you want {agent} to check something periodically.",
+                 "# The Enact Agent daemon reads '- ' task lines when heartbeat is enabled.\n# A configured heartbeat.message can still run when this file is empty.\n# Base cadence is configured with heartbeat.interval_minutes; runtime may adjust it.\n# Add tasks below when you want {agent} to check something periodically."),
+            ),
+        ),
+        "MEMORY.md": (
+            "042e86b07f9491642574f1736995d96a8334caf058007d1fc5ec34334e4860a7",
+            (
+                ("# MEMORY.md — Long-Term Memory", "# MEMORY.md — Long-Term Memory for Enact Agent"),
+                ("*Your curated memories. The distilled essence, not raw logs.*",
+                 "*Curated local memories for this Enact Agent. The distilled essence, not raw logs.*"),
+                ("- This file is auto-injected into your system prompt each session",
+                 "- The active runtime determines whether this file is injected into a session"),
+                ("- ONLY loaded in main session (direct chat with your human)\n- NEVER loaded in group chats or shared contexts",
+                 "- Never store secrets.\n- Session injection depends on active runtime and channel policy. Keep private notes out of shared replies."),
+                ("## How This Works\n", "## How This Works\n\nThis local file is separate from Enact's workspace Memory Graph. Use the graph only through tools exposed to the active session.\n\n"),
+            ),
+        ),
+    }
+    for filename, (expected_sha256, edits) in templates.items():
+        path = template_dir / filename
+        source_bytes = path.read_bytes()
+        actual_sha256 = hashlib.sha256(source_bytes).hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise RuntimeError(
+                f"Upstream overlay drift: review Enact persona projection for {path} "
+                f"(expected {expected_sha256}, got {actual_sha256})"
+            )
+        text = source_bytes.decode("utf-8")
+        for old, new in edits:
+            if text.count(old) != 1:
+                raise RuntimeError(f"Upstream overlay drift: expected exactly one {old!r} in {path}")
+            text = text.replace(old, new)
+        path.write_text(text)
+
+
 # Skip comments and character literals; project only Rust string contents.
 # This covers raw/byte/C strings as well as env!, concat! and format! inputs.
 _RUST_TOKEN = re.compile(
@@ -146,6 +236,164 @@ def project_environment(source):
         projected = project_environment_literals(original)
         if projected != original:
             path.write_text(projected)
+
+
+def project_workspace_owned_agent_paths(source):
+    """Keep standalone agent state under Enact home, with workspace-first ownership."""
+    schema = source / "crates/zeroclaw-config/src/schema.rs"
+    replace_required(
+        schema,
+        '''    /// Returns the agent's `[agents.<alias>.workspace.path]` override
+    /// when set (operator-explicit, e.g. for putting a workspace on a
+    /// different disk), otherwise derives
+    /// `<install>/agents/<alias>/workspace/` from the install root
+    /// (the directory containing `config.toml`).
+    ///
+    /// Per-agent workspaces live under
+    /// `<install>/agents/<alias>/workspace/` and hold the agent's
+    /// markdown memory (MEMORY.md), identity files (IDENTITY.md,
+    /// SOUL.md), and any other per-agent plaintext state. Shared
+    /// databases (SQLite memory, sessions, cost records) live under
+    /// `config.data_dir` instead and partition by agent at the row
+    /// level. Per-agent overrides via `[agents.<alias>.workspace.path]`
+    /// pin an arbitrary filesystem path (e.g. a different mount).''',
+        '''    /// Returns the agent's `[agents.<alias>.workspace.path]` override
+    /// when set; otherwise resolves the default workspace below
+    /// `$ENACT_HOME/workspace/agents/<alias>`.
+    ///
+    /// This is the standalone Enact Agent default. Enact-hosted sessions
+    /// receive an explicit private workspace projection and therefore do
+    /// not use this default as their durable profile store. Shared runtime
+    /// databases remain under `config.data_dir`.''',
+    )
+    replace_required(
+        schema,
+        '''        self.install_root_dir()
+            .join("agents")
+            .join(agent_alias)
+            .join("workspace")''',
+        '''        let enact_home = std::env::var_os("ENACT_HOME")
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty())
+            .or_else(|| UserDirs::new().map(|u| u.home_dir().join(".enact")))
+            .unwrap_or_else(|| PathBuf::from(".enact"));
+        enact_home.join("workspace").join("agents").join(agent_alias)''',
+    )
+    replace_required(
+        schema,
+        '''    /// Install root: `<install>/` derived from `config_path`'s parent. Used
+    /// to compute `<install>/shared/`, `<install>/agents/`, and the
+    /// skill-bundle directory defaults. Public so consumers (gateway, CLI,
+    /// SkillsService) share the same anchor.
+    #[must_use]
+    pub fn install_root_dir(&self) -> std::path::PathBuf {
+        self.config_path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+    }''',
+        '''    /// Enact Agent state root. The default config lives in `agent/`, while
+    /// workspace-owned content lives beside it under `workspace/`. An
+    /// explicitly selected config directory remains its own root.
+    #[must_use]
+    pub fn install_root_dir(&self) -> std::path::PathBuf {
+        let config_dir = self.config_path.parent().map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        if std::env::var_os("ENACT_AGENT_CONFIG_DIR").is_some() {
+            return config_dir;
+        }
+        if let Some(enact_home) = std::env::var_os("ENACT_HOME")
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty())
+            && config_dir == enact_home.join("agent")
+        {
+            return enact_home;
+        }
+        if config_dir.file_name().is_some_and(|name| name == "agent")
+            && config_dir.parent().is_some_and(|parent| parent.file_name().is_some_and(|name| name == ".enact"))
+        {
+            return config_dir.parent().map(std::path::Path::to_path_buf)
+                .unwrap_or(config_dir);
+        }
+        config_dir
+    }''',
+    )
+    replace_required(
+        schema,
+        '''/// Resolution order: `ZEROCLAW_CONFIG_DIR` env → `ZEROCLAW_WORKSPACE` env → `~/.zeroclaw/config.toml`.''',
+        '''/// Resolution order: `ENACT_AGENT_CONFIG_DIR` env → `ZEROCLAW_WORKSPACE` env → `$ENACT_HOME/agent/config.toml`.''',
+    )
+    replace_required(
+        schema,
+        '''    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+    {
+        return Ok(PathBuf::from(home).join(".zeroclaw"));
+    }
+
+    let home = UserDirs::new()
+        .map(|u| u.home_dir().to_path_buf())
+        .context("Could not find home directory")?;
+    Ok(home.join(".zeroclaw"))''',
+        '''    if let Ok(home) = std::env::var("ENACT_HOME")
+        && !home.trim().is_empty()
+    {
+        return Ok(PathBuf::from(home).join("agent"));
+    }
+
+    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+    {
+        return Ok(PathBuf::from(home).join(".enact").join("agent"));
+    }
+
+    let home = UserDirs::new()
+        .map(|u| u.home_dir().join(".enact").join("agent"))
+        .context("Could not find home directory")?;
+    Ok(home)''',
+    )
+    replace_required(
+        schema,
+        '''/// `<config_dir>` honors `ZEROCLAW_CONFIG_DIR` and otherwise defaults to
+/// `~/.zeroclaw`. The zerocode binary mirrors this path inline (it carries no
+/// `zeroclaw-*` dependency).''',
+        '''/// `<config_dir>` honors `ENACT_AGENT_CONFIG_DIR` and otherwise defaults to
+/// `$ENACT_HOME/agent`. The zerocode binary mirrors this path inline.''',
+    )
+    native = source / "crates/zeroclaw-config/src/platform/native.rs"
+    replace_required(
+        native,
+        '''        directories::UserDirs::new().map_or_else(
+            || PathBuf::from(".zeroclaw"),
+            |u| u.home_dir().join(".zeroclaw"),
+        )''',
+        '''        std::env::var_os("ENACT_HOME")
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty())
+            .or_else(|| directories::UserDirs::new().map(|u| u.home_dir().join(".enact")))
+            .unwrap_or_else(|| PathBuf::from(".enact"))
+            .join("agent")''',
+    )
+    bundle = source / "crates/zeroclaw-config/src/agent_bundle.rs"
+    replace_required(bundle, 'default location (`agents/<alias>/workspace`)',
+                     'default location (`workspace/agents/<alias>`)')
+    exporter = source / "src/alias_cli/export.rs"
+    replace_required(exporter, 'const WORKSPACE_FAMILY: &str = "agents";',
+                     'const WORKSPACE_FAMILY: &str = "workspace";')
+    exporter_text = exporter.read_text()
+    for old, new in (
+        ('agents tree', 'workspace tree'),
+        ('agents/researcher/workspace', 'workspace/agents/researcher'),
+    ):
+        if old not in exporter_text:
+            raise RuntimeError(f"Upstream overlay drift: expected {old!r} in {exporter}")
+        exporter_text = exporter_text.replace(old, new)
+    exporter.write_text(exporter_text)
+    replace_required(
+        source / "crates/zeroclaw-config/src/agent_bundle.rs",
+        '"agents/researcher/workspace"',
+        '"workspace/agents/researcher"',
+    )
 
 
 def project_session_tools(source):
@@ -332,6 +580,7 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
     name_lookup = 'crate::i18n::get_required_cli_string("cli-enact-agent-name")'
     replace_required(SOURCE / "crates/zeroclaw-runtime/src/agent/personality_templates/mod.rs",
                      'agent: "ZeroClaw".to_string(),', f"agent: {name_lookup},")
+    project_personality_templates(SOURCE)
     replace_required(SOURCE / "crates/zeroclaw-runtime/src/rpc/dispatch.rs",
                      '.unwrap_or_else(|| "ZeroClaw".to_string()),',
                      f".unwrap_or_else(|| {name_lookup}),")
@@ -362,7 +611,9 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
                      'crate::i18n::get_required_cli_string("cli-enact-agent-identity")')
     # Both the CLI and gateway call this updater. Compile-time env is mandatory
     # so a manual Cargo build of staged source cannot silently omit protection.
-    update_signature = "pub async fn run(target_version: Option<&str>, force: bool) -> Result<()> {"
+    update_signature = (
+        "pub async fn run(target_version: Option<&str>, force: bool, standard: bool) -> Result<()> {"
+    )
     replace_required(SOURCE / "src/commands/update.rs", update_signature,
                      update_signature + '\n    if !env!("ENACT_AGENT_BUILD").is_empty() {\n'
                      '        #[cfg(feature = "agent-runtime")]\n'
@@ -405,6 +656,7 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
                      f'assert_eq!(result["agentInfo"]["title"], "{brand["name"]}");')
     project_clap_docs(brand)
     project_environment(SOURCE)
+    project_workspace_owned_agent_paths(SOURCE)
     project_session_tools(SOURCE)
     project_tool_result_status(SOURCE)
     run(cargo, "fmt", "--all", cwd=SOURCE)
