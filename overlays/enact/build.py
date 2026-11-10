@@ -529,6 +529,21 @@ def project_clap_docs(brand):
         path.write_text("".join(lines))
 
 
+def project_enact_builtin_docs_skill(source):
+    """Ship Enact-facing instructions for the embedded product-docs skill."""
+    asset = source / "crates/zeroclaw-runtime/src/skills/assets/zeroclaw-docs/SKILL.md"
+    original = asset.read_bytes()
+    expected_sha256 = "435f3a50ef1561e7945f7f382fcb9ef1cbe9350d4e17161d955837301387921d"
+    if hashlib.sha256(original).hexdigest() != expected_sha256:
+        raise RuntimeError(f"Upstream overlay drift: review built-in docs skill at {asset}")
+
+    overlay = ROOT / "overlays/enact/skills/enact-agent-docs/SKILL.md"
+    content = overlay.read_text()
+    if not content.startswith("---\nname: enact-agent-docs\n"):
+        raise RuntimeError(f"Enact built-in docs skill has invalid frontmatter: {overlay}")
+    asset.write_text(content)
+
+
 def prepare(cargo="cargo", committed=False, revision="HEAD"):
     brand = manifest()
     if SOURCE.exists():
@@ -555,6 +570,8 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
     # These ignored outputs are prerequisites produced by the normal web build.
     if not committed and (ROOT / "web/dist/index.html").is_file():
         shutil.copytree(ROOT / "web/dist", SOURCE / "web/dist", dirs_exist_ok=True)
+
+    project_enact_builtin_docs_skill(SOURCE)
 
     # Retain Fluent keys, placeholders, URLs, config paths and crate identities.
     # Only the existing product literal and bare command examples are projected.
