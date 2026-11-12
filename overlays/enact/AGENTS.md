@@ -207,6 +207,40 @@ web checks for broader changes. Docs-only changes use existing quality/link gate
 with explicit `DOCS_FILES` for these outside-book files; default discovery can
 skip them. Do not report a skipped gate as file validation.
 
+### Verifying the plugin hook guest
+
+The hook world is a guest contract, so the host side can be proven without a
+guest. Proving the guest side needs a real component: the `wasm32-wasip2`
+target, a guest crate outside this repository (so the product's lockfile does
+not move), and the prepared tree's WIT — the hook interface is installed into
+the prepared tree, not tracked in the repository's `wit/`.
+
+```sh
+rustup target add wasm32-wasip2
+python3 overlays/enact/build.py prepare          # installs wit/v0/hook.wit
+```
+
+The guest crate is a `cdylib` that binds the `hook-plugin` world from
+`<repo>/target/enact/source/wit/v0` and implements `plugin-info` plus `hook`.
+`wit-bindgen` 0.51 generates the guest traits without a receiver, so the
+implementations are `fn name() -> String` and
+`fn handle(event: String, payload: String) -> Result<HookResult, String>`.
+The `logging` import needs no implementation: a guest that does not provide it
+still builds.
+
+```sh
+cargo build --target wasm32-wasip2 --manifest-path <guest>/Cargo.toml
+```
+
+The host then admits the component through `PluginHost::hook_plugin_details`,
+builds the scope with `PluginInstanceScope::from_manifest(&manifest,
+PluginCapability::Hook, binding, grants)`, loads it with `WasmHook::from_wasm`,
+and calls the `HookHandler` methods. A guest that answers `rewrite` must have
+its answer applied to the tool result, and the host must read the guest's
+`name` export. Keep the guest outside the repository: a nested crate is not a
+workspace member, but a workspace member would change `Cargo.lock`, which this
+overlay does not do.
+
 Build a clean approved commit with Python 3.11+, the declared Rust toolchain
 already installed in rustup, and cached locked dependencies. Resolve tool paths
 for that exact toolchain and clear inherited env.
