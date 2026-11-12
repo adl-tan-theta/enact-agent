@@ -1,11 +1,48 @@
 //! Enact ships Always + External built-ins; OptIn adapters stay feature-gated off.
 
 use zeroclaw_config::builtin_tools::{BuiltinToolsConfig, CORE_TOOL_NAMES};
+use zeroclaw_runtime::tools::families::{FAMILIES, MEMBERS};
 use zeroclaw_tools::inventory::{BuiltinToolCompilation, BUILTIN_TOOLS};
 
 #[test]
 fn always_and_external_builtins_are_compiled() {
-    assert_eq!(BUILTIN_TOOLS.len(), 93, "review upstream inventory drift");
+    // The size of the inventory is derived, never written down: the build
+    // checks the compiled inventory against the canonical registry — the
+    // operations inventory plus the family table — and fails the build when
+    // the two disagree. What this test owns is the inventory's shape and
+    // the canonical tools the consolidation introduced.
+    let mut names: Vec<&str> = BUILTIN_TOOLS.iter().map(|tool| tool.name).collect();
+    let rows = names.len();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(
+        names.len(),
+        rows,
+        "the built-in inventory repeats a tool name"
+    );
+    assert!(rows > 0, "the built-in inventory is empty");
+
+    // Every canonical family tool ships as an inventory row, and so does
+    // every tool a family replaced.
+    let missing_families: Vec<&str> = FAMILIES
+        .iter()
+        .map(|family| family.name)
+        .filter(|name| !names.contains(name))
+        .collect();
+    assert!(
+        missing_families.is_empty(),
+        "the built-in inventory omits canonical family tools: {missing_families:?}"
+    );
+    let missing_members: Vec<&str> = MEMBERS
+        .iter()
+        .map(|member| member.tool)
+        .filter(|tool| !names.contains(tool))
+        .collect();
+    assert!(
+        missing_members.is_empty(),
+        "the built-in inventory omits consolidated tools: {missing_members:?}"
+    );
+
     let missing: Vec<_> = BUILTIN_TOOLS
         .iter()
         .filter(|tool| {

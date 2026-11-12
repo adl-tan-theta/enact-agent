@@ -1016,6 +1016,9 @@ mod tests {
         assert!(is_legacy_member("schedule"));
         assert!(!is_legacy_member("shell"));
         assert!(!is_legacy_member("cron"));
-        assert_eq!(legacy_member_names().len(), 36);
+        // Derived from the member table, not written down: the count is
+        // whatever the table says, and the table is what the operations
+        // inventory is checked against.
+        assert_eq!(legacy_member_names().len(), MEMBERS.len());
     }
 }
