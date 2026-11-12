@@ -1,11 +1,13 @@
 """Boundary checks for the staged distribution's environment namespace."""
 import importlib.util
+import inspect
 from pathlib import Path
 import tempfile
 import unittest
 import shutil
 import hashlib
 import json
+import re
 import tarfile
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
@@ -161,7 +163,7 @@ class BuiltinCapabilitiesTests(unittest.TestCase):
             ("crates/zeroclaw-tools/src/inventory.rs", 'name: "delegate",',
              'name: "renamed_delegate",', "delegate inventory entry"),
             ("crates/zeroclaw-tools/src/inventory.rs", 'name: "calculator",',
-             'name: "shell",', "93 unique"),
+             'name: "shell",', "repeats a tool name"),
             ("crates/zeroclaw-runtime/src/tools/mod.rs", 'register_tool!("spawn_subagent"',
              'register_tool!("renamed_spawn_subagent"', "expected one"),
         )
@@ -206,6 +208,93 @@ class BuiltinCapabilitiesTests(unittest.TestCase):
             with patch.object(build, "NATIVE_FEATURES", ("agent-runtime", "tools-compat")):
                 with self.assertRaisesRegex(RuntimeError, "must omit OptIn tool features"):
                     build.project_enact_agent_capabilities(source)
+
+
+class CanonicalToolInventoryTests(unittest.TestCase):
+    """The advertised tool set is derived, and the guard judges the shipped tree."""
+
+    def write_inventory(self, source, names):
+        target = source / "crates/zeroclaw-tools/src/inventory.rs"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            "pub const BUILTIN_TOOLS: &[BuiltinToolSpec] = &[\n"
+            + "".join(
+                "    BuiltinToolSpec {\n"
+                f'        name: "{name}",\n'
+                "        tier: ToolTier::Core,\n"
+                "        compilation: BuiltinToolCompilation::Always,\n"
+                "    },\n"
+                for name in names
+            )
+            + "];\n"
+        )
+        return target
+
+    def operations_tools(self):
+        rows = (build.ROOT / "overlays/enact/zeroclaw-tools-operations.csv").read_text().splitlines()[1:]
+        return {line.split(",", 1)[0].lstrip("#") for line in rows if line.strip()}
+
+    def family_tools(self):
+        text = (build.ROOT / "overlays/enact/native/tools/families.rs").read_text()
+        return set(re.findall(r'^        name: "([^"]+)",$', text, flags=re.MULTILINE))
+
+    def test_canonical_set_is_the_operations_inventory_plus_the_family_tools(self):
+        operations = self.operations_tools()
+        families = self.family_tools()
+        self.assertTrue(operations)
+        self.assertTrue(families)
+        self.assertEqual(build.enact_canonical_tool_names(), operations | families)
+        # The family tools are canonical names in their own right: the
+        # consolidation adds inventory rows the operations inventory does
+        # not list, which is why the advertised count is derived.
+        self.assertFalse(families & operations)
+
+    def test_guard_accepts_the_canonical_tool_set(self):
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            self.write_inventory(source, sorted(build.enact_canonical_tool_names()))
+            build.check_enact_tool_inventory(source)
+
+    def test_guard_fails_closed_when_a_canonical_tool_is_missing(self):
+        expected = build.enact_canonical_tool_names()
+        missing = sorted(expected)[0]
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            self.write_inventory(source, sorted(expected - {missing}))
+            with self.assertRaisesRegex(RuntimeError, "missing from the inventory"):
+                build.check_enact_tool_inventory(source)
+
+    def test_guard_fails_closed_when_an_unlisted_tool_is_registered(self):
+        expected = build.enact_canonical_tool_names()
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            self.write_inventory(source, sorted(expected | {"not_a_canonical_tool"}))
+            with self.assertRaisesRegex(RuntimeError, "registered but not listed"):
+                build.check_enact_tool_inventory(source)
+
+    def test_guard_fails_closed_when_a_tool_is_repeated(self):
+        expected = sorted(build.enact_canonical_tool_names())
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            self.write_inventory(source, expected + [expected[0]])
+            with self.assertRaisesRegex(RuntimeError, "repeats a tool name"):
+                build.check_enact_tool_inventory(source)
+
+    def test_upstream_inventory_alone_does_not_satisfy_the_canonical_set(self):
+        upstream = build.ROOT / "crates/zeroclaw-tools/src/inventory.rs"
+        names = set(re.findall(r'^\s+name: "([^"]+)",$', upstream.read_text(), flags=re.MULTILINE))
+        expected = build.enact_canonical_tool_names()
+        self.assertTrue(names < expected, "upstream must be a strict subset of the canonical set")
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            target = source / "crates/zeroclaw-tools/src/inventory.rs"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(upstream, target)
+            with self.assertRaisesRegex(RuntimeError, "missing from the inventory"):
+                build.check_enact_tool_inventory(source)
+
+    def test_prepare_checks_the_inventory_it_ships(self):
+        self.assertIn("check_enact_tool_inventory(SOURCE)", inspect.getsource(build.prepare))
 
 
 class ReleaseTests(unittest.TestCase):

@@ -200,6 +200,54 @@ def check_enact_family_members(source):
                 )
 
 
+def enact_canonical_tool_names(csv_path=None, families_path=None):
+    """The canonical tool names the build must advertise.
+
+    Derived, never written down: every tool the operations inventory lists,
+    plus every canonical family tool the consolidation adds. The bridge
+    registry and the native MCP surface are generated from the same two
+    sources, so this set is the single answer to "what does Enact ship?".
+    """
+    csv_path = csv_path or (ROOT / "overlays/enact/zeroclaw-tools-operations.csv")
+    families_path = families_path or (ROOT / "overlays/enact/native/tools/families.rs")
+    listed = set()
+    for line in csv_path.read_text().splitlines()[1:]:
+        if not line.strip():
+            continue
+        listed.add(line.split(",", 1)[0].lstrip("#"))
+    families = set(re.findall(r'^        name: "([^"]+)",$', families_path.read_text(), flags=re.MULTILINE))
+    if not families:
+        raise RuntimeError("Upstream overlay drift: no canonical family tools found in the overlay")
+    return listed | families
+
+
+def check_enact_tool_inventory(source, csv_path=None, families_path=None):
+    """Fail closed if the built-in inventory and the canonical tool set disagree.
+
+    This runs against the prepared tree, after every projection has added its
+    rows, so upstream drift, a stale operations inventory and a missing family
+    row all fail the build instead of shipping a registry that disagrees with
+    the canonical registry the bridge publishes.
+    """
+    inventory = source / "crates/zeroclaw-tools/src/inventory.rs"
+    names = re.findall(r'^\s+name: "([^"]+)",$', inventory.read_text(), flags=re.MULTILINE)
+    if len(set(names)) != len(names):
+        raise RuntimeError(
+            f"Enact tool inventory drift: the built-in inventory repeats a tool name "
+            f"({len(names)} rows, {len(set(names))} names)"
+        )
+    expected = enact_canonical_tool_names(csv_path, families_path)
+    registered = set(names)
+    if registered != expected:
+        missing = sorted(expected - registered)
+        extra = sorted(registered - expected)
+        raise RuntimeError(
+            "Enact tool inventory drift: the built-in inventory and the canonical "
+            f"tool set disagree; missing from the inventory: {missing}; "
+            f"registered but not listed: {extra}"
+        )
+
+
 def manifest():
     brand = json.loads((ROOT / "overlays/enact/brand.json").read_text())
     if not re.fullmatch(r"[a-z][a-z0-9-]*", brand["command"]):
@@ -679,29 +727,12 @@ def project_enact_agent_capabilities(source):
             f"Upstream overlay drift: the built-in inventory repeats a tool name "
             f"({len(inventory_names)} rows, {len(set(inventory_names))} names)"
         )
-    # The advertised tool count is DERIVED, never written down. The built-in
-    # inventory must name exactly the tools the operations inventory lists,
-    # plus the canonical family tools the consolidation adds.
-    operations_csv = ROOT / "overlays/enact/zeroclaw-tools-operations.csv"
-    listed_tools = set()
-    for line in operations_csv.read_text().splitlines()[1:]:
-        if not line.strip():
-            continue
-        listed_tools.add(line.split(",", 1)[0].lstrip("#"))
-    families_rs = ROOT / "overlays/enact/native/tools/families.rs"
-    family_tools = set(re.findall(r'^        name: "([^"]+)",$', families_rs.read_text(), flags=re.MULTILINE))
-    if not family_tools:
-        raise RuntimeError("Upstream overlay drift: no canonical family tools found in the overlay")
-    expected_tools = listed_tools | family_tools
-    registered_tools = set(inventory_names)
-    if registered_tools != expected_tools:
-        missing = sorted(expected_tools - registered_tools)
-        extra = sorted(registered_tools - expected_tools)
-        raise RuntimeError(
-            "Upstream overlay drift: the built-in inventory and the operations "
-            f"inventory disagree; missing from the inventory: {missing}; "
-            f"registered but not listed: {extra}"
-        )
+    # The advertised tool count is DERIVED, never written down. It is compared
+    # against the *prepared* tree, once every projection has added its rows:
+    # `check_enact_tool_inventory` runs at the end of `prepare()`. Comparing
+    # here instead would judge the tree against the canonical set before the
+    # overlay's own rows exist, and blame upstream drift for the overlay's
+    # own work.
     runtime_tools = source / "crates/zeroclaw-runtime/src/tools/mod.rs"
     runtime_text = runtime_tools.read_text()
     required_runtime_anchors = (
@@ -3305,6 +3336,9 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
     project_workspace_owned_agent_paths(SOURCE)
     project_session_tools(SOURCE)
     project_tool_result_status(SOURCE)
+    # The advertised tool set is derived, so it is checked against the tree
+    # that actually ships, once every projection has added its inventory rows.
+    check_enact_tool_inventory(SOURCE)
     run(cargo, "fmt", "--all", cwd=SOURCE)
     print(f"Prepared branded source: {SOURCE}")
     return brand
