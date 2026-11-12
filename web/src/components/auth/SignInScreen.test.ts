@@ -5,6 +5,7 @@ import React, { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import type { OidcMethod } from "../../lib/authSession.ts";
+import { brandDisplayText } from "../../lib/branding.ts";
 import type { SignOutNotice } from "../../hooks/useAuth.ts";
 
 const fakeWindow = Object.assign(new EventTarget(), {
@@ -66,7 +67,7 @@ test("sign-in on: a button per provider above the unchanged pairing form", () =>
 
 test("after sign-out the screen says the provider session may remain", () => {
   const html = render([corp], { kind: "signed-out", provider: "corp" });
-  assert.ok(html.includes("signed out of ZeroClaw. You may still be signed in at corp."));
+  assert.ok(html.includes(brandDisplayText("signed out of ZeroClaw. You may still be signed in at corp.")));
   const ended = render([corp], { kind: "session-ended" });
   assert.ok(ended.includes("Your session has ended."));
 });

@@ -2,6 +2,8 @@ import { useEffect, useState, type ReactNode } from "react";
 import { getAdminPairCode, generatePairCode, PairCodeForbiddenError } from "../../lib/api";
 import type { OidcMethod } from "../../lib/authSession";
 import { basePath } from "../../lib/basePath";
+import { brand, brandLogo } from "../../lib/branding";
+import { useTheme } from "../../hooks/useTheme";
 import { t } from "../../lib/i18n";
 import type { SignInMethods, SignOutNotice } from "../../hooks/useAuth";
 import { RelayNotice } from "./RelayNotice";
@@ -36,7 +38,7 @@ export function PairingDialog({
   // can show the exact recovery command — including the alternate port that made
   // the config-default `get-paircode` miss the running instance (#5266).
   const gatewayPort = window.location.port;
-  const cliRecoveryCommand = `zeroclaw gateway get-paircode --new${gatewayPort ? ` --port ${gatewayPort}` : ""}`;
+  const cliRecoveryCommand = `${brand.command} gateway get-paircode --new${gatewayPort ? ` --port ${gatewayPort}` : ""}`;
 
   // Fetch the current pairing code (public endpoint works in Docker too)
   useEffect(() => {
@@ -239,6 +241,7 @@ export function PairingDialog({
 
 /** The sign-in card: logo, title and a status line above `children`. */
 function SignInFrame({ status, children }: { status: ReactNode; children: ReactNode }) {
+  const { resolvedTheme } = useTheme();
   return (
     <div
       className="min-h-screen flex items-center justify-center"
@@ -248,15 +251,15 @@ function SignInFrame({ status, children }: { status: ReactNode; children: ReactN
       <div className="relative surface-panel p-8 w-full max-w-md animate-fade-in-scale">
         <div className="text-center mb-8">
           <img
-            src={`${basePath}/_app/logo.png`}
-            alt="ZeroClaw"
-            className="h-20 w-20 rounded-2xl object-cover mx-auto mb-4 animate-float"
+            src={`${basePath}/_app/${brandLogo(resolvedTheme)}`}
+            alt={t("sidebar.logo_alt")}
+            className="h-20 w-20 object-contain mx-auto mb-4 animate-float"
             onError={(e) => {
               e.currentTarget.style.display = "none";
             }}
           />
           <h1 className="text-2xl font-bold mb-2 text-gradient-blue">
-            ZeroClaw
+            {t("sidebar.brand")}
           </h1>
           <p className="text-sm" style={{ color: "var(--pc-text-muted)" }}>
             {status}
