@@ -129,6 +129,85 @@ class ToolResultStatusProjectionTests(unittest.TestCase):
                           (source / files[4]).read_text())
 
 
+class BuiltinCapabilitiesTests(unittest.TestCase):
+    paths = ("Cargo.toml", "crates/zeroclaw-tools/src/inventory.rs",
+             "crates/zeroclaw-runtime/src/tools/mod.rs",
+             "overlays/enact/tests/builtin_capabilities.rs")
+
+    def copy_inputs(self, source):
+        for relative in self.paths:
+            target = source / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(build.ROOT / relative, target)
+
+    def test_actual_upstream_capabilities_project_without_changing_originals(self):
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            self.copy_inputs(source)
+            before = {path: (source / path).read_bytes() for path in self.paths}
+            build.project_enact_agent_capabilities(source)
+            for path, content in before.items():
+                self.assertEqual((source / path).read_bytes(), content)
+            self.assertEqual((source / "tests/enact_builtin_capabilities.rs").read_bytes(),
+                             before[self.paths[-1]])
+            with self.assertRaisesRegex(RuntimeError, "already exists"):
+                build.project_enact_agent_capabilities(source)
+
+    def test_missing_bundle_members_and_inventory_drift_fail_closed(self):
+        mutations = (
+            ("Cargo.toml",
+             'tools-external = ["zeroclaw-runtime/tools-external", "zeroclaw-tools/tools-external"]\n',
+             '', "tools-external"),
+            ("crates/zeroclaw-tools/src/inventory.rs", 'name: "delegate",',
+             'name: "renamed_delegate",', "delegate inventory entry"),
+            ("crates/zeroclaw-tools/src/inventory.rs", 'name: "calculator",',
+             'name: "shell",', "93 unique"),
+            ("crates/zeroclaw-runtime/src/tools/mod.rs", 'register_tool!("spawn_subagent"',
+             'register_tool!("renamed_spawn_subagent"', "expected one"),
+        )
+        for relative, old, new, error in mutations:
+            with self.subTest(path=relative, anchor=old), tempfile.TemporaryDirectory() as name:
+                source = Path(name)
+                self.copy_inputs(source)
+                target = source / relative
+                text = target.read_text()
+                self.assertEqual(text.count(old), 1, "mutation must reach its real upstream anchor")
+                target.write_text(text.replace(old, new))
+                with self.assertRaisesRegex(RuntimeError, error):
+                    build.project_enact_agent_capabilities(source)
+
+    def test_full_build_selects_always_and_external_tools(self):
+        brand = build.manifest()
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            source = root / "source"
+            (source / "web/dist").mkdir(parents=True)
+            (source / "web/dist/index.html").write_text("build prerequisite fixture")
+            with patch.object(build, "ROOT", root), patch.object(build, "SOURCE", source), \
+                    patch.object(build, "OUT", root), patch.object(build, "run") as run, \
+                    patch.object(build.shutil, "copy2"), patch.object(build.shutil, "copytree"):
+                # Atomic replacement still needs the staged file to exist.
+                (root / "bin").mkdir()
+                (root / "bin/.zeroclaw-new").touch()
+                build.build(brand, debug=True)
+            args = next(call.args for call in run.call_args_list if len(call.args) > 1 and call.args[1] == "build")
+            features = args[args.index("--features") + 1].split(",")
+            self.assertEqual(features, ["agent-runtime", "tools-external", "embedded-web"])
+            self.assertEqual(build.NATIVE_FEATURES, ("agent-runtime", "tools-external"))
+            capability = next(call.args for call in run.call_args_list if len(call.args) > 1 and call.args[1] == "test")
+            self.assertIn("--test", capability)
+            self.assertIn("enact_builtin_capabilities", capability)
+            self.assertEqual(capability[capability.index("--features") + 1].split(","), features)
+
+    def test_opt_in_features_in_native_selection_fail_closed(self):
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            self.copy_inputs(source)
+            with patch.object(build, "NATIVE_FEATURES", ("agent-runtime", "tools-compat")):
+                with self.assertRaisesRegex(RuntimeError, "must omit OptIn tool features"):
+                    build.project_enact_agent_capabilities(source)
+
+
 class ReleaseTests(unittest.TestCase):
     def test_fixed_encoded_remap_flag_preserves_spaces_without_inherited_flags(self):
         home = "/private/fixture builder/home with spaces"

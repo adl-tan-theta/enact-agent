@@ -19,6 +19,9 @@ ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "target/enact"
 SOURCE = OUT / "source"
 PUBLIC_BUILD_HOME = "/build/home"
+# Always + External only. OptIn SaaS/coding-cli adapters stay out of the ship set for now.
+NATIVE_FEATURES = ("agent-runtime", "tools-external")
+DISTRIBUTION_FEATURES = (*NATIVE_FEATURES, "embedded-web")
 
 
 def release_manifest():
@@ -544,6 +547,65 @@ def project_enact_builtin_docs_skill(source):
     asset.write_text(content)
 
 
+def project_enact_agent_capabilities(source):
+    """Fail closed if Always/External ship capabilities or inventory anchors drift."""
+    inventory = source / "crates/zeroclaw-tools/src/inventory.rs"
+    inventory_text = inventory.read_text()
+    for name in ("spawn_subagent", "delegate"):
+        if inventory_text.count(f'name: "{name}"') != 1:
+            raise RuntimeError(f"Upstream overlay drift: expected one {name} inventory entry in {inventory}")
+    inventory_names = re.findall(r'^\s+name: "([^"]+)",$', inventory_text, flags=re.MULTILINE)
+    if len(inventory_names) != 93 or len(set(inventory_names)) != len(inventory_names):
+        raise RuntimeError(
+            f"Upstream overlay drift: expected 93 unique built-in inventory rows, found {len(inventory_names)}"
+        )
+    runtime_tools = source / "crates/zeroclaw-runtime/src/tools/mod.rs"
+    runtime_text = runtime_tools.read_text()
+    required_runtime_anchors = (
+        "register_tool!(\"spawn_subagent\"",
+        "SpawnSubagentTool::new(",
+        "DelegateTool::new_with_options(",
+        "tool_arcs.push(delegate_tool as Arc<dyn Tool>)",
+    )
+    for anchor in required_runtime_anchors:
+        if runtime_text.count(anchor) != 1:
+            raise RuntimeError(f"Upstream overlay drift: expected one {anchor!r} in {runtime_tools}")
+    cargo = tomllib.loads((source / "Cargo.toml").read_text())
+    features = cargo.get("features", {}).get("agent-runtime", [])
+    if "dep:zeroclaw-tools" not in features:
+        raise RuntimeError("Enact headless build must retain zeroclaw-tools in agent-runtime")
+    if "tools-external" not in cargo.get("features", {}):
+        raise RuntimeError("Enact headless build requires ZeroClaw's tools-external feature")
+    feature_graph = cargo["features"]
+    selected = set()
+
+    def visit(feature):
+        if feature in selected:
+            return
+        selected.add(feature)
+        for dependency in feature_graph.get(feature, []):
+            visit(dependency)
+
+    for feature in NATIVE_FEATURES:
+        visit(feature)
+    if "tools-external" not in selected:
+        raise RuntimeError("Enact headless build must select tools-external for External adapters")
+    opt_in = {name for name in feature_graph if name.startswith("tool-")}
+    unexpected = sorted(opt_in & selected)
+    if unexpected:
+        raise RuntimeError(
+            f"Enact Always/External ship set must omit OptIn tool features: {unexpected}"
+        )
+
+    # Compile the capability contract against the same graph as the binary.
+    # Keep the durable test overlay-owned; never replace an upstream test.
+    target = source / "tests/enact_builtin_capabilities.rs"
+    if target.exists():
+        raise RuntimeError(f"Upstream overlay drift: Enact capability test already exists at {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source / "overlays/enact/tests/builtin_capabilities.rs", target)
+
+
 def prepare(cargo="cargo", committed=False, revision="HEAD"):
     brand = manifest()
     if SOURCE.exists():
@@ -572,6 +634,7 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
         shutil.copytree(ROOT / "web/dist", SOURCE / "web/dist", dirs_exist_ok=True)
 
     project_enact_builtin_docs_skill(SOURCE)
+    project_enact_agent_capabilities(SOURCE)
 
     # Retain Fluent keys, placeholders, URLs, config paths and crate identities.
     # Only the existing product literal and bare command examples are projected.
@@ -688,6 +751,15 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
     return brand
 
 
+def verify_builtin_capabilities(cargo, source, env, target=None, features=NATIVE_FEATURES, committed=False):
+    """Execute the Always/External capability contract against the selected graph."""
+    args = [cargo, "test", "--locked", *( ["--offline"] if committed else []), "--release", "--no-default-features",
+            "--features", ",".join(features), "--test", "enact_builtin_capabilities"]
+    if target is not None:
+        args.extend(["--target", target])
+    run(*args, cwd=source, env=env)
+
+
 def desktop_svg(svg, indicator=None):
     """Put either canonical SVG aspect ratio inside the square icon canvas."""
     ET.register_namespace("", "http://www.w3.org/2000/svg")
@@ -746,9 +818,10 @@ def build(brand, debug=False):
     if not (SOURCE / "web/dist/index.html").is_file():
         raise RuntimeError("Missing web/dist. Run npm run build in web before building the distribution.")
     env = dict(os.environ, ENACT_AGENT_BUILD="1", CARGO_TARGET_DIR=str(ROOT / "target"))
-    args = ["cargo", "build", "--locked", "--bin", "zeroclaw", "--features", "embedded-web"]
+    args = ["cargo", "build", "--locked", "--bin", "zeroclaw", "--features", ",".join(DISTRIBUTION_FEATURES)]
     if not debug:
         args.append("--release")
+    verify_builtin_capabilities("cargo", SOURCE, env, features=DISTRIBUTION_FEATURES)
     run(*args, cwd=SOURCE, env=env)
     binary = ROOT / "target" / ("debug" if debug else "release") / "zeroclaw"
     bindir = OUT / "bin"
@@ -802,8 +875,9 @@ def native(brand, cargo, rustc, output_dir, committed=False, expected_commit=Non
         raise RuntimeError(f"Headless distribution releases currently require native macOS or Linux, got {target}")
     # Keep provider credentials and arbitrary compiler overrides out of Cargo.
     env = native_build_environment(cargo, rustc, provenance)
+    verify_builtin_capabilities(cargo, SOURCE, env, target=target, committed=committed)
     run(cargo, "build", "--locked", *(["--offline"] if committed else []), "--release", "--no-default-features",
-        "--features", "agent-runtime", "--target", target, "--bin", "zeroclaw", cwd=SOURCE, env=env)
+        "--features", ",".join(NATIVE_FEATURES), "--target", target, "--bin", "zeroclaw", cwd=SOURCE, env=env)
     binary = destination / brand["command"]
     staged = destination / ".enact-agent-new"
     compiled = OUT / "cargo-native" / target / "release/zeroclaw"
@@ -847,7 +921,7 @@ def native(brand, cargo, rustc, output_dir, committed=False, expected_commit=Non
         "distribution": {"version": release["version"], "tag": f"{brand['command']}-v{release['version']}"},
         "source": provenance,
         "manifestSha256": hashlib.sha256((destination / "manifest.json").read_bytes()).hexdigest(),
-        "build": {"defaultFeatures": False, "features": ["agent-runtime"],
+        "build": {"defaultFeatures": False, "features": list(NATIVE_FEATURES),
                   "pathRemapping": {"from": "$HOME", "to": PUBLIC_BUILD_HOME,
                                     "privateHomeScan": "passed" if committed else "not-run"}},
     }, indent=2) + "\n")
