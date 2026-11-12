@@ -46,6 +46,12 @@ delegate,list_results,Host,Always,crates/zeroclaw-runtime/src/tools/delegate.rs,
 delegate,cancel_task,Host,Always,crates/zeroclaw-runtime/src/tools/delegate.rs,source action enum,true
 delegate,await_sessions,Host,Always,crates/zeroclaw-runtime/src/tools/delegate.rs,source action enum,true
 send_message_to_peer,send,Host,Always,crates/zeroclaw-runtime/src/tools/send_message_to_peer.rs,tool contract,true
+wait,wait,Host,Always,crates/zeroclaw-runtime/src/tools/wait_task.rs,tool contract,true
+checkpoint,checkpoint,Host,Always,crates/zeroclaw-runtime/src/tools/checkpoint.rs,tool contract,true
+rewind,rewind,Host,Always,crates/zeroclaw-runtime/src/tools/rewind.rs,tool contract,true
+plan_mode,status,Host,Always,crates/zeroclaw-runtime/src/tools/plan_mode.rs,source action enum,true
+plan_mode,plan,Host,Always,crates/zeroclaw-runtime/src/tools/plan_mode.rs,source action enum,true
+plan_execute,execute,Host,Always,crates/zeroclaw-runtime/src/tools/plan_execute.rs,tool contract,true
 model_switch,get,Host,Always,crates/zeroclaw-runtime/src/tools/model_switch.rs,source action/operation enum,true
 model_switch,list_model_providers,Host,Always,crates/zeroclaw-runtime/src/tools/model_switch.rs,source action/operation enum,true
 model_switch,list_models,Host,Always,crates/zeroclaw-runtime/src/tools/model_switch.rs,source action/operation enum,true
@@ -79,8 +85,7 @@ sessions_list,list,Host,Always,crates/zeroclaw-tools/src/sessions.rs,tool contra
 sessions_history,history,Host,Always,crates/zeroclaw-tools/src/sessions.rs,tool contract,true
 sessions_send,send,Host,Always,crates/zeroclaw-tools/src/sessions.rs,tool contract,true
 sop_list,list,Host,Always,crates/zeroclaw-runtime/src/tools/sop_list.rs,tool contract,true
-sop_execute,execute_step,Host,Always,crates/zeroclaw-runtime/src/tools/sop_execute.rs,source action enum,true
-sop_execute,wait_approval,Host,Always,crates/zeroclaw-runtime/src/tools/sop_execute.rs,source action enum,true
+sop_execute,execute,Host,Always,crates/zeroclaw-runtime/src/tools/sop_execute.rs,tool contract,true
 sop_advance,advance,Host,Always,crates/zeroclaw-runtime/src/tools/sop_advance.rs,tool contract,true
 sop_approve,approve,Host,Always,crates/zeroclaw-runtime/src/tools/sop_approve.rs,tool contract,true
 sop_status,status,Host,Always,crates/zeroclaw-runtime/src/tools/sop_status.rs,tool contract,true
@@ -92,6 +97,12 @@ sop_workshop,apply,Host,Always,crates/zeroclaw-runtime/src/tools/sop_workshop.rs
 sop_workshop,reject,Host,Always,crates/zeroclaw-runtime/src/tools/sop_workshop.rs,source action enum,true
 sop_workshop,quarantine,Host,Always,crates/zeroclaw-runtime/src/tools/sop_workshop.rs,source action enum,true
 read_skill,read,Host,Always,crates/zeroclaw-runtime/src/tools/read_skill.rs,tool contract,true
+learn,learn,Host,Always,crates/zeroclaw-runtime/src/tools/learn.rs,tool contract,true
+skills_list,list,Host,Always,crates/zeroclaw-runtime/src/tools/skill_manage.rs,tool contract,true
+skill_view,view,Host,Always,crates/zeroclaw-runtime/src/tools/skill_manage.rs,tool contract,true
+skill_manage,patch,Host,Always,crates/zeroclaw-runtime/src/tools/skill_manage.rs,source action enum,true
+skill_manage,write_file,Host,Always,crates/zeroclaw-runtime/src/tools/skill_manage.rs,source action enum,true
+skill_manage,archive,Host,Always,crates/zeroclaw-runtime/src/tools/skill_manage.rs,source action enum,true
 TodoWrite,write_task_list,Host,Always,crates/zeroclaw-runtime/src/tools/todo_write.rs,tool contract,true
 canvas,clear,Host,Always,crates/zeroclaw-tools/src/canvas.rs,source action/operation enum,true
 canvas,eval,Host,Always,crates/zeroclaw-tools/src/canvas.rs,source action/operation enum,true
@@ -225,3 +236,10 @@ knowledge,graph_stats,Optional,Always,crates/zeroclaw-tools/src/knowledge_tool.r
 knowledge,graph_neighbors,Optional,Always,crates/zeroclaw-tools/src/knowledge_tool.rs,source action enum,true
 knowledge,client_network,Optional,Always,crates/zeroclaw-tools/src/knowledge_tool.rs,source action enum,true
 knowledge,interaction_log,Optional,Always,crates/zeroclaw-tools/src/knowledge_tool.rs,source action enum,true
+compose,assemble,Host,Always,crates/zeroclaw-runtime/src/tools/compose.rs,tool contract,true
+expand,retrieve,Host,Always,crates/zeroclaw-runtime/src/tools/expand.rs,tool contract,true
+ast_grep,search,Host,Always,crates/zeroclaw-runtime/src/tools/ast_grep.rs,tool contract,true
+ast_edit,rewrite,Host,Always,crates/zeroclaw-runtime/src/tools/ast_grep.rs,tool contract,true
+callgraph,analyse,Host,Always,crates/zeroclaw-runtime/src/tools/callgraph.rs,tool contract,true
+graph,dependencies,Host,Always,crates/zeroclaw-runtime/src/tools/callgraph.rs,tool contract,true
+radar,report,Host,Always,crates/zeroclaw-runtime/src/tools/radar.rs,tool contract,true

@@ -79,6 +79,127 @@ def replace_required(path, old, new):
     path.write_text(text.replace(old, new))
 
 
+def remove_required(path, old):
+    """Remove an anchored block that must be there exactly once."""
+    text = path.read_text()
+    if text.count(old) != 1:
+        raise RuntimeError(f"Upstream overlay drift: expected exactly one {old!r} in {path}")
+    path.write_text(text.replace(old, ""))
+
+
+def _family_table(families_rs):
+    """The member table the overlay's family module declares.
+
+    The table decides which operations a family advertises and whether a
+    member takes its operation as an `action` argument, so it is checked
+    against the operations inventory and against the tools themselves.
+    """
+    text = families_rs.read_text()
+    members = {}
+    pattern = re.compile(
+        r"Member\s*\{\s*tool:\s*\"([^\"]+)\",\s*ops:\s*&\[(.*?)\],\s*"
+        r"action_backed:\s*(true|false)\s*,?\s*\}",
+        re.S,
+    )
+    for match in pattern.finditer(text):
+        ops = re.findall(r'"([^"]+)"', match.group(2))
+        members[match.group(1)] = (ops, match.group(3) == "true")
+    families = {}
+    for match in re.finditer(
+        r'name:\s*"([^"]+)",\s*\n\s*description:\s*"[^"]*",\s*\n\s*members:\s*&\[(.*?)\]',
+        text,
+        re.S,
+    ):
+        families[match.group(1)] = re.findall(r'"([^"]+)"', match.group(2))
+    return families, members
+
+
+def _tool_declares_action(tool_source):
+    """Whether a tool's parameter schema declares an `action` property."""
+    text = tool_source.read_text()
+    match = re.search(r"fn parameters_schema\([^)]*\)\s*->\s*[^{]*\{", text)
+    if not match:
+        return False
+    body = text[match.end():match.end() + 20000]
+    return bool(re.search(r'"action"\s*:\s*\{', body))
+
+
+def check_enact_family_members(source):
+    """Fail closed if the family table and the tools it describes disagree.
+
+    The family table is the one place that says which operations a
+    consolidated tool advertises. If it drifts from the operations
+    inventory, the native surface and the canonical registry the bridge
+    publishes would offer different actions under the same name — so the
+    drift is a build failure, not a runtime surprise.
+    """
+    families_rs = ROOT / "overlays/enact/native/tools/families.rs"
+    families, members = _family_table(families_rs)
+    if not families or not members:
+        raise RuntimeError("Upstream overlay drift: the family module declares no families")
+
+    # Every member belongs to exactly one family, and every declared member
+    # belongs to one at all.
+    claimed = {}
+    for family, names in families.items():
+        for name in names:
+            if name in claimed:
+                raise RuntimeError(
+                    f"Upstream overlay drift: {name} is claimed by both "
+                    f"{claimed[name]} and {family}"
+                )
+            claimed[name] = family
+    if set(claimed) != set(members):
+        raise RuntimeError(
+            "Upstream overlay drift: the family table and the member table disagree; "
+            f"only in the families: {sorted(set(claimed) - set(members))}; "
+            f"only in the members: {sorted(set(members) - set(claimed))}"
+        )
+
+    operations_csv = ROOT / "overlays/enact/zeroclaw-tools-operations.csv"
+    ops_by_tool = {}
+    source_by_tool = {}
+    for line in operations_csv.read_text().splitlines()[1:]:
+        if not line.strip():
+            continue
+        parts = line.split(",")
+        tool = parts[0].lstrip("#")
+        ops_by_tool.setdefault(tool, [])
+        if parts[1] not in ops_by_tool[tool]:
+            ops_by_tool[tool].append(parts[1])
+        source_by_tool.setdefault(tool, parts[4])
+
+    for tool, (ops, action_backed) in sorted(members.items()):
+        csv_ops = ops_by_tool.get(tool)
+        if csv_ops is None:
+            raise RuntimeError(
+                f"Upstream overlay drift: {tool} is a family member but is not "
+                "in the operations inventory"
+            )
+        if csv_ops != ops:
+            raise RuntimeError(
+                f"Upstream overlay drift: the family table lists {ops} for {tool} "
+                f"but the operations inventory lists {csv_ops}"
+            )
+        tool_source = source / source_by_tool[tool]
+        if not tool_source.is_file():
+            raise RuntimeError(f"Upstream overlay drift: the source of {tool} is missing")
+        declares_action = _tool_declares_action(tool_source)
+        if declares_action != action_backed:
+            raise RuntimeError(
+                f"Upstream overlay drift: {tool} "
+                f"{'takes' if declares_action else 'does not take'} an action argument, "
+                "but the family table says otherwise"
+            )
+        if declares_action:
+            text = tool_source.read_text()
+            missing = [op for op in ops if f'"{op}"' not in text]
+            if missing:
+                raise RuntimeError(
+                    f"Upstream overlay drift: {tool} does not offer the operations {missing}"
+                )
+
+
 def manifest():
     brand = json.loads((ROOT / "overlays/enact/brand.json").read_text())
     if not re.fullmatch(r"[a-z][a-z0-9-]*", brand["command"]):
@@ -275,12 +396,10 @@ def project_workspace_owned_agent_paths(source):
             .join("agents")
             .join(agent_alias)
             .join("workspace")''',
-        '''        let enact_home = std::env::var_os("ENACT_HOME")
-            .map(PathBuf::from)
-            .filter(|path| !path.as_os_str().is_empty())
-            .or_else(|| UserDirs::new().map(|u| u.home_dir().join(".enact")))
-            .unwrap_or_else(|| PathBuf::from(".enact"));
-        enact_home.join("workspace").join("agents").join(agent_alias)''',
+        '''        self.install_root_dir()
+            .join("workspace")
+            .join("agents")
+            .join(agent_alias)''',
     )
     replace_required(
         schema,
@@ -555,9 +674,33 @@ def project_enact_agent_capabilities(source):
         if inventory_text.count(f'name: "{name}"') != 1:
             raise RuntimeError(f"Upstream overlay drift: expected one {name} inventory entry in {inventory}")
     inventory_names = re.findall(r'^\s+name: "([^"]+)",$', inventory_text, flags=re.MULTILINE)
-    if len(inventory_names) != 93 or len(set(inventory_names)) != len(inventory_names):
+    if len(set(inventory_names)) != len(inventory_names):
         raise RuntimeError(
-            f"Upstream overlay drift: expected 93 unique built-in inventory rows, found {len(inventory_names)}"
+            f"Upstream overlay drift: the built-in inventory repeats a tool name "
+            f"({len(inventory_names)} rows, {len(set(inventory_names))} names)"
+        )
+    # The advertised tool count is DERIVED, never written down. The built-in
+    # inventory must name exactly the tools the operations inventory lists,
+    # plus the canonical family tools the consolidation adds.
+    operations_csv = ROOT / "overlays/enact/zeroclaw-tools-operations.csv"
+    listed_tools = set()
+    for line in operations_csv.read_text().splitlines()[1:]:
+        if not line.strip():
+            continue
+        listed_tools.add(line.split(",", 1)[0].lstrip("#"))
+    families_rs = ROOT / "overlays/enact/native/tools/families.rs"
+    family_tools = set(re.findall(r'^        name: "([^"]+)",$', families_rs.read_text(), flags=re.MULTILINE))
+    if not family_tools:
+        raise RuntimeError("Upstream overlay drift: no canonical family tools found in the overlay")
+    expected_tools = listed_tools | family_tools
+    registered_tools = set(inventory_names)
+    if registered_tools != expected_tools:
+        missing = sorted(expected_tools - registered_tools)
+        extra = sorted(registered_tools - expected_tools)
+        raise RuntimeError(
+            "Upstream overlay drift: the built-in inventory and the operations "
+            f"inventory disagree; missing from the inventory: {missing}; "
+            f"registered but not listed: {extra}"
         )
     runtime_tools = source / "crates/zeroclaw-runtime/src/tools/mod.rs"
     runtime_text = runtime_tools.read_text()
@@ -606,6 +749,2396 @@ def project_enact_agent_capabilities(source):
     shutil.copy2(source / "overlays/enact/tests/builtin_capabilities.rs", target)
 
 
+def project_enact_mcp_server(source):
+    """Ship the Enact MCP server so one registry serves Codex CLI and Claude Code.
+
+    The module is overlay-authored: it lives under `overlays/enact/native/` and is
+    copied into the prepared source, so no tracked `src/` or `crates/` Rust
+    changes and no `Cargo.toml` / `Cargo.lock` churn. Every dependency it uses
+    is already a dependency of the root package.
+    """
+    overlay = ROOT / "overlays/enact/native/mcp-server/src"
+    target = source / "src/mcp_server"
+    if target.exists():
+        raise RuntimeError(f"Upstream overlay drift: MCP server module already exists at {target}")
+    shutil.copytree(overlay, target)
+
+    main_source = source / "src/main.rs"
+    replace_required(
+        main_source,
+        '#[cfg(feature = "agent-runtime")]\nmod i18n;\n',
+        '#[cfg(feature = "agent-runtime")]\nmod i18n;\n'
+        '#[cfg(feature = "agent-runtime")]\nmod mcp_server;\n',
+    )
+    replace_required(
+        main_source,
+        "#[derive(Subcommand, Debug)]\nenum Commands {\n",
+        "#[derive(Subcommand, Debug)]\nenum Commands {\n"
+        "    /// Serve the built-in tool registry to MCP hosts (Codex CLI, Claude Code).\n"
+        '    #[cfg(feature = "agent-runtime")]\n'
+        "    Mcp {\n"
+        "        #[command(subcommand)]\n"
+        "        command: mcp_server::cli::McpCommands,\n"
+        "    },\n\n",
+    )
+    replace_required(
+        main_source,
+        '    #[cfg(feature = "agent-runtime")]\n    match cli.command {\n        Commands::Onboard { .. }\n',
+        '    #[cfg(feature = "agent-runtime")]\n    match cli.command {\n'
+        "        Commands::Mcp { command } => {\n"
+        "            mcp_server::cli::run(command).await?;\n"
+        "            Ok(())\n"
+        "        }\n\n"
+        "        Commands::Onboard { .. }\n",
+    )
+
+
+def project_enact_declarative_hooks(source):
+    """Ship declarative command hooks and post-call output rewriting.
+
+    Two overlay-authored modules become the hook system:
+
+    * `zeroclaw-config::hooks` — the declarative rule shape (`event`,
+      `command`, `matcher`, `timeout_ms`, `fail_open`, `env`, `priority`),
+      wired into `hooks.commands` in the config schema.
+    * `zeroclaw-runtime::hooks::command` — the `HookHandler` that runs a
+      configured command, feeds it the event payload as JSON on stdin, and
+      reads a JSON decision (`continue` / `block` / `rewrite`) from stdout.
+
+    The runtime also gains a *modifying* `after_tool_call` hook: the result
+    is rewritten before it is logged and before it reaches the model, so a
+    redaction hook keeps a secret out of both. Audit hooks still observe the
+    original result.
+
+    Both modules live under `overlays/enact/native/` and are copied into the
+    prepared source, so no tracked `src/` or `crates/` Rust changes and no
+    `Cargo.toml` / `Cargo.lock` churn: every dependency they use is already a
+    dependency of the crate they land in.
+    """
+    overlay = ROOT / "overlays/enact/native/hooks"
+
+    config_module = source / "crates/zeroclaw-config/src/hooks.rs"
+    if config_module.exists():
+        raise RuntimeError(f"Upstream overlay drift: hooks config module already exists at {config_module}")
+    shutil.copy2(overlay / "config.rs", config_module)
+
+    command_module = source / "crates/zeroclaw-runtime/src/hooks/command.rs"
+    if command_module.exists():
+        raise RuntimeError(f"Upstream overlay drift: command hook module already exists at {command_module}")
+    command_module.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(overlay / "command.rs", command_module)
+
+    # ── config: expose the declarative rule shape ────────────────────────
+    replace_required(
+        source / "crates/zeroclaw-config/src/lib.rs",
+        "pub mod helpers;\n",
+        "pub mod helpers;\npub mod hooks;\n",
+    )
+
+    replace_required(
+        source / "crates/zeroclaw-config/src/schema.rs",
+        "    #[serde(default)]\n"
+        "    #[nested]\n"
+        "    pub builtin: BuiltinHooksConfig,\n"
+        "}",
+        "    #[serde(default)]\n"
+        "    #[nested]\n"
+        "    pub builtin: BuiltinHooksConfig,\n"
+        "    /// Declarative hook rules. Each entry maps a lifecycle event to a\n"
+        "    /// command: the command receives the event payload as JSON on stdin\n"
+        "    /// and answers with a JSON decision (`continue`, `block`, or\n"
+        "    /// `rewrite`) on stdout. A script is a hook — no plugin runtime and\n"
+        "    /// no rebuild required.\n"
+        "    ///\n"
+        "    /// ```toml\n"
+        "    /// [[hooks.commands]]\n"
+        "    /// event = \"before_tool_call\"\n"
+        "    /// matcher = \"shell\"\n"
+        "    /// command = \"bin/audit-shell.sh\"\n"
+        "    /// timeout_ms = 2000\n"
+        "    /// ```\n"
+        "    #[serde(default)]\n"
+        "    pub commands: Vec<crate::hooks::HookCommandConfig>,\n"
+        "}",
+    )
+
+    replace_required(
+        source / "crates/zeroclaw-config/src/schema.rs",
+        "        Self {\n"
+        "            enabled: true,\n"
+        "            builtin: BuiltinHooksConfig::default(),\n"
+        "        }",
+        "        Self {\n"
+        "            enabled: true,\n"
+        "            builtin: BuiltinHooksConfig::default(),\n"
+        "            commands: Vec::new(),\n"
+        "        }",
+    )
+
+    # ── api: the modifying after_tool_call hook ──────────────────────────
+    replace_required(
+        source / "crates/zeroclaw-api/src/hook.rs",
+        "    /// Inspect or modify a tool call with explicit correlation context.",
+        "    /// Inspect or modify the result of a tool call.\n"
+        "    ///\n"
+        "    /// Runs sequentially by priority after the tool completed and before\n"
+        "    /// the result is logged or handed to the model, so a handler that\n"
+        "    /// rewrites the output keeps the original text out of both. A\n"
+        "    /// handler that cancels the result stops it from reaching the model.\n"
+        "    ///\n"
+        "    /// Observing handlers (`on_after_tool_call`) still see the original\n"
+        "    /// result: rewriting is for what the model reads, not for what an\n"
+        "    /// auditor records.\n"
+        "    async fn after_tool_call(&self, _tool: &str, _result: &ToolResult) -> HookResult<ToolResult> {\n"
+        "        HookResult::Continue(_result.clone())\n"
+        "    }\n"
+        "\n"
+        "    /// Inspect or modify a tool call with explicit correlation context.",
+    )
+
+    # ── runtime: register the configured commands ────────────────────────
+    replace_required(
+        source / "crates/zeroclaw-runtime/src/hooks/mod.rs",
+        "pub mod builtin;\n",
+        "pub mod builtin;\npub mod command;\n",
+    )
+
+    # The upstream runner tests build `HooksConfig` literally; the new
+    # declarative list is part of that struct, so those literals carry it.
+    for builtin_block in (
+        "                command_logger: false,\n"
+        "                webhook_audit: zeroclaw_config::schema::WebhookAuditConfig::default(),\n"
+        "            },\n",
+        "                command_logger: true,\n"
+        "                webhook_audit: zeroclaw_config::schema::WebhookAuditConfig::default(),\n"
+        "            },\n",
+        "                command_logger: true,\n"
+        "                webhook_audit: zeroclaw_config::schema::WebhookAuditConfig {\n"
+        "                    enabled: true,\n"
+        "                    url: \"http://example.com/audit\".to_string(),\n"
+        "                    ..Default::default()\n"
+        "                },\n"
+        "            },\n",
+    ):
+        replace_required(
+            source / "crates/zeroclaw-runtime/src/hooks/runner.rs",
+            builtin_block,
+            builtin_block + "            commands: Vec::new(),\n",
+        )
+
+    replace_required(
+        source / "crates/zeroclaw-runtime/src/hooks/runner.rs",
+        "        runner\n    }\n\n    /// Register a handler and re-sort by descending priority.",
+        "        for rule in &hooks.commands {\n"
+        "            runner.register(Box::new(super::command::CommandHook::new(rule.clone())));\n"
+        "        }\n"
+        "        runner\n"
+        "    }\n"
+        "\n"
+        "    /// Register a handler and re-sort by descending priority.",
+    )
+
+    replace_required(
+        source / "crates/zeroclaw-runtime/src/hooks/runner.rs",
+        "    pub async fn run_on_message_received(\n",
+        "    /// Run the modifying after-call chain: sequential by priority,\n"
+        "    /// short-circuit on `Cancel`, panic-isolated per handler.\n"
+        "    ///\n"
+        "    /// Each handler sees the result the previous handler produced, so a\n"
+        "    /// redaction hook and a size-limiting hook compose in priority\n"
+        "    /// order.\n"
+        "    pub async fn run_after_tool_call(\n"
+        "        &self,\n"
+        "        tool: &str,\n"
+        "        result: &ToolResult,\n"
+        "    ) -> HookResult<ToolResult> {\n"
+        "        let mut current = result.clone();\n"
+        "        for h in &self.handlers {\n"
+        "            let hook_name = h.name();\n"
+        "            match AssertUnwindSafe(h.after_tool_call(tool, &current))\n"
+        "                .catch_unwind()\n"
+        "                .await\n"
+        "            {\n"
+        "                Ok(HookResult::Continue(next)) => current = next,\n"
+        "                Ok(HookResult::Cancel(reason)) => {\n"
+        "                    ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({\"hook\": hook_name, \"reason\": reason.to_string()})), \"after_tool_call cancelled by hook\");\n"
+        "                    return HookResult::Cancel(reason);\n"
+        "                }\n"
+        "                Err(_) => {\n"
+        "                    ::zeroclaw_log::record!(\n"
+        "                        ERROR,\n"
+        "                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)\n"
+        "                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)\n"
+        "                            .with_attrs(::serde_json::json!({\"hook\": hook_name})),\n"
+        "                        \"after_tool_call hook panicked; continuing with the previous result\"\n"
+        "                    );\n"
+        "                }\n"
+        "            }\n"
+        "        }\n"
+        "        HookResult::Continue(current)\n"
+        "    }\n"
+        "\n"
+        "    pub async fn run_on_message_received(\n",
+    )
+
+    # ── runtime: apply the rewritten result before it is logged ───────────
+    replace_required(
+        source / "crates/zeroclaw-runtime/src/agent/turn/post_exec.rs",
+        "    for (((idx, call), stream_call), outcome) in executable_indices\n",
+        "    for (((idx, call), stream_call), mut outcome) in executable_indices\n",
+    )
+
+    replace_required(
+        source / "crates/zeroclaw-runtime/src/agent/turn/post_exec.rs",
+        "        ::zeroclaw_log::record!(\n"
+        "            INFO,\n"
+        "            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Complete)\n"
+        "                .with_category(::zeroclaw_log::EventCategory::Tool)\n",
+        "        // ── Hook: after_tool_call (modifying) ─────────────\n"
+        "        // Runs before the result is logged and before it reaches the model,\n"
+        "        // so a redaction hook keeps the original text out of both. The\n"
+        "        // observing hook below still sees the original result.\n"
+        "        let mut original_result: Option<crate::tools::ToolResult> = None;\n"
+        "        if let Some(hooks) = ctx.hooks {\n"
+        "            let original = crate::tools::ToolResult {\n"
+        "                success: outcome.success,\n"
+        "                output: outcome.output.clone().into(),\n"
+        "                error: None,\n"
+        "            };\n"
+        "            match hooks.run_after_tool_call(&call.name, &original).await {\n"
+        "                zeroclaw_api::hook::HookResult::Continue(rewritten) => {\n"
+        "                    let rewritten_text = rewritten.output.as_str().to_string();\n"
+        "                    if rewritten_text != outcome.output {\n"
+        "                        outcome.output = rewritten_text;\n"
+        "                    }\n"
+        "                    if !rewritten.success {\n"
+        "                        outcome.success = false;\n"
+        "                    }\n"
+        "                    if let Some(error) = rewritten.error.as_ref() {\n"
+        "                        outcome.error_reason = Some(error.clone());\n"
+        "                    }\n"
+        "                }\n"
+        "                zeroclaw_api::hook::HookResult::Cancel(reason) => {\n"
+        "                    outcome.success = false;\n"
+        "                    outcome.output = reason.clone();\n"
+        "                    outcome.error_reason = Some(reason);\n"
+        "                }\n"
+        "            }\n"
+        "            original_result = Some(original);\n"
+        "        }\n"
+        "\n"
+        "        ::zeroclaw_log::record!(\n"
+        "            INFO,\n"
+        "            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Complete)\n"
+        "                .with_category(::zeroclaw_log::EventCategory::Tool)\n",
+    )
+
+    replace_required(
+        source / "crates/zeroclaw-runtime/src/agent/turn/post_exec.rs",
+        "        // ── Hook: after_tool_call (void) ─────────────────\n"
+        "        if let Some(hooks) = ctx.hooks {\n"
+        "            let hook_context = crate::hooks::tool_call_hook_context(ctx.turn_id, iteration, *idx);\n"
+        "            let tool_result_obj = crate::tools::ToolResult {\n"
+        "                success: outcome.success,\n"
+        "                output: outcome.output.clone().into(),\n"
+        "                error: None,\n"
+        "            };\n"
+        "            // The prepared arguments travel with the completion call so\n"
+        "            // argument-auditing hooks export what was actually dispatched and\n"
+        "            // never need to retain arguments between the hook phases.\n"
+        "            hooks\n"
+        "                .fire_after_tool_call_with_context_and_args(\n"
+        "                    &hook_context,\n"
+        "                    &call.name,\n"
+        "                    &call.arguments,\n"
+        "                    &tool_result_obj,\n"
+        "                    outcome.duration,\n"
+        "                )\n"
+        "                .await;\n"
+        "        }\n",
+        "        // ── Hook: after_tool_call (void, observing) ───────\n"
+        "        if let (Some(hooks), Some(tool_result_obj)) = (ctx.hooks, original_result.as_ref()) {\n"
+        "            let hook_context = crate::hooks::tool_call_hook_context(ctx.turn_id, iteration, *idx);\n"
+        "            // The prepared arguments travel with the completion call so\n"
+        "            // argument-auditing hooks export what was actually dispatched and\n"
+        "            // never need to retain arguments between the hook phases. The\n"
+        "            // result is the original one: a rewriting hook changed what the\n"
+        "            // model reads, not what an auditor records.\n"
+        "            hooks\n"
+        "                .fire_after_tool_call_with_context_and_args(\n"
+        "                    &hook_context,\n"
+        "                    &call.name,\n"
+        "                    &call.arguments,\n"
+        "                    tool_result_obj,\n"
+        "                    outcome.duration,\n"
+        "                )\n"
+        "                .await;\n"
+        "        }\n",
+    )
+
+
+def project_enact_trust_split(source):
+    """Split the `before_llm_call` request into trusted and untrusted context.
+
+    The hook path hands a handler the whole message vector, so a handler that
+    wanted to sanitize or rewrite the externally-authored half had no way to
+    tell it apart from the operator's own instructions. This adds:
+
+    * `zeroclaw_api::hook::LlmCallHookContext` — the trust classification of
+      each message, plus the trust class of the turn that produced the
+      request;
+    * `HookHandler::before_llm_call_with_context` — a context-aware variant
+      that defaults to the existing `before_llm_call`, so every current
+      handler keeps working unchanged;
+    * `agent::turn::trust_split` — the runtime-side classifier, which marks
+      tool output and externally-framed payloads untrusted, and user messages
+      untrusted when the turn's own trust class says so.
+    """
+    overlay = ROOT / "overlays/enact/native/hooks/trust.rs"
+    target = source / "crates/zeroclaw-runtime/src/hooks/trust.rs"
+    if target.exists():
+        raise RuntimeError(f"Upstream overlay drift: trust split module already exists at {target}")
+    shutil.copy2(overlay, target)
+
+    api_hook = source / "crates/zeroclaw-api/src/hook.rs"
+
+    replace_required(
+        api_hook,
+        "use crate::channel::ChannelMessage;\n",
+        "use crate::channel::ChannelMessage;\nuse crate::ingress::TrustClass;\n",
+    )
+
+    replace_required(
+        api_hook,
+        "/// Result of a modifying hook — continue with (possibly modified) data, or cancel.",
+        "/// How one message of an LLM request is classified for trust.\n"
+        "///\n"
+        "/// The split matters because a handler that sanitizes, rewrites, or\n"
+        "/// audits a request must be able to tell the operator's own\n"
+        "/// instructions from text that arrived from somewhere else.\n"
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\n"
+        "pub enum MessageTrust {\n"
+        "    /// Operator- or system-authored context: the system prompt, the\n"
+        "    /// memory preamble, configured skills, the agent's own prior turns.\n"
+        "    Trusted,\n"
+        "    /// Externally-authored content: channel messages, tool output,\n"
+        "    /// fetched documents, delegated agent output.\n"
+        "    Untrusted,\n"
+        "}\n"
+        "\n"
+        "/// The trust split of one LLM request.\n"
+        "///\n"
+        "/// `before_llm_call` hands a handler the whole message vector. This\n"
+        "/// context says which messages carry externally-authored content, so a\n"
+        "/// handler can act on the untrusted half alone and leave the\n"
+        "/// instructions alone.\n"
+        "#[derive(Debug, Clone)]\n"
+        "pub struct LlmCallHookContext {\n"
+        "    /// The trust class of the turn that produced the request.\n"
+        "    pub turn_trust: TrustClass,\n"
+        "    /// The trust of each message, parallel to the request's message\n"
+        "    /// vector.\n"
+        "    pub message_trust: Vec<MessageTrust>,\n"
+        "}\n"
+        "\n"
+        "impl Default for LlmCallHookContext {\n"
+        "    fn default() -> Self {\n"
+        "        Self {\n"
+        "            turn_trust: TrustClass::Trusted,\n"
+        "            message_trust: Vec::new(),\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "impl LlmCallHookContext {\n"
+        "    /// Build a context from a turn trust class and a per-message split.\n"
+        "    #[must_use]\n"
+        "    pub fn new(turn_trust: TrustClass, message_trust: Vec<MessageTrust>) -> Self {\n"
+        "        Self {\n"
+        "            turn_trust,\n"
+        "            message_trust,\n"
+        "        }\n"
+        "    }\n"
+        "\n"
+        "    /// Whether the message at `index` carries untrusted content.\n"
+        "    #[must_use]\n"
+        "    pub fn is_untrusted(&self, index: usize) -> bool {\n"
+        "        self.message_trust\n"
+        "            .get(index)\n"
+        "            .is_some_and(|trust| *trust == MessageTrust::Untrusted)\n"
+        "    }\n"
+        "\n"
+        "    /// The indices of the messages that carry untrusted content.\n"
+        "    #[must_use]\n"
+        "    pub fn untrusted_indices(&self) -> Vec<usize> {\n"
+        "        self.message_trust\n"
+        "            .iter()\n"
+        "            .enumerate()\n"
+        "            .filter(|(_, trust)| **trust == MessageTrust::Untrusted)\n"
+        "            .map(|(index, _)| index)\n"
+        "            .collect()\n"
+        "    }\n"
+        "\n"
+        "    /// The number of messages that carry untrusted content.\n"
+        "    #[must_use]\n"
+        "    pub fn untrusted_count(&self) -> usize {\n"
+        "        self.message_trust\n"
+        "            .iter()\n"
+        "            .filter(|trust| **trust == MessageTrust::Untrusted)\n"
+        "            .count()\n"
+        "    }\n"
+        "\n"
+        "    /// The number of messages that carry trusted content.\n"
+        "    #[must_use]\n"
+        "    pub fn trusted_count(&self, total: usize) -> usize {\n"
+        "        total.saturating_sub(self.untrusted_count())\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "/// Result of a modifying hook — continue with (possibly modified) data, or cancel.",
+    )
+
+    replace_required(
+        api_hook,
+        "    async fn before_tool_call(&self, name: String, args: Value) -> HookResult<(String, Value)> {",
+        "    /// Inspect or modify an LLM request with its trust split.\n"
+        "    ///\n"
+        "    /// The default delegates to [`HookHandler::before_llm_call`], so a\n"
+        "    /// handler that does not care about trust keeps working unchanged. A\n"
+        "    /// handler that does care can act on the untrusted messages alone,\n"
+        "    /// without being able to rewrite the operator's instructions by\n"
+        "    /// accident.\n"
+        "    async fn before_llm_call_with_context(\n"
+        "        &self,\n"
+        "        _context: &LlmCallHookContext,\n"
+        "        messages: &mut Vec<ChatMessage>,\n"
+        "        model: &mut String,\n"
+        "    ) -> HookResult<()> {\n"
+        "        self.before_llm_call(messages, model).await\n"
+        "    }\n"
+        "\n"
+        "    async fn before_tool_call(&self, name: String, args: Value) -> HookResult<(String, Value)> {",
+    )
+
+    # ── runtime: the context-aware runner ─────────────────────────────────
+    replace_required(
+        source / "crates/zeroclaw-runtime/src/hooks/runner.rs",
+        "use zeroclaw_api::hook::ToolCallHookContext;\n",
+        "use zeroclaw_api::hook::{LlmCallHookContext, ToolCallHookContext};\n",
+    )
+
+    replace_required(
+        source / "crates/zeroclaw-runtime/src/hooks/runner.rs",
+        "    pub async fn run_before_tool_call(\n",
+        "    /// Run the before-LLM-call chain with the request's trust split.\n"
+        "    ///\n"
+        "    /// Same contract as [`Self::run_before_llm_call`] — sequential by\n"
+        "    /// priority, short-circuit on `Cancel`, panic-isolated per handler —\n"
+        "    /// except that each handler also receives the trust classification of\n"
+        "    /// the request.\n"
+        "    pub async fn run_before_llm_call_with_context(\n"
+        "        &self,\n"
+        "        context: &LlmCallHookContext,\n"
+        "        messages: &mut Vec<ChatMessage>,\n"
+        "        model: &mut String,\n"
+        "    ) -> HookResult<()> {\n"
+        "        for h in &self.handlers {\n"
+        "            let hook_name = h.name();\n"
+        "            let mut candidate_messages = messages.clone();\n"
+        "            let mut candidate_model = model.clone();\n"
+        "            match AssertUnwindSafe(h.before_llm_call_with_context(\n"
+        "                context,\n"
+        "                &mut candidate_messages,\n"
+        "                &mut candidate_model,\n"
+        "            ))\n"
+        "            .catch_unwind()\n"
+        "            .await\n"
+        "            {\n"
+        "                Ok(HookResult::Continue(())) => {\n"
+        "                    *messages = candidate_messages;\n"
+        "                    *model = candidate_model;\n"
+        "                }\n"
+        "                Ok(HookResult::Cancel(reason)) => {\n"
+        "                    ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({\"hook\": hook_name, \"reason\": reason.to_string()})), \"before_llm_call cancelled by hook\");\n"
+        "                    return HookResult::Cancel(reason);\n"
+        "                }\n"
+        "                Err(_) => {\n"
+        "                    ::zeroclaw_log::record!(\n"
+        "                        ERROR,\n"
+        "                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)\n"
+        "                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)\n"
+        "                            .with_attrs(::serde_json::json!({\"hook\": hook_name})),\n"
+        "                        \"before_llm_call hook panicked; continuing with previous values\"\n"
+        "                    );\n"
+        "                }\n"
+        "            }\n"
+        "        }\n"
+        "        HookResult::Continue(())\n"
+        "    }\n"
+        "\n"
+        "    pub async fn run_before_tool_call(\n",
+    )
+
+    # ── runtime: classify the request before the hook chain runs ─────────
+    replace_required(
+        source / "crates/zeroclaw-runtime/src/hooks/mod.rs",
+        "pub mod command;\n",
+        "pub mod command;\npub mod trust;\n",
+    )
+
+    replace_required(
+        source / "crates/zeroclaw-runtime/src/agent/turn/mod.rs",
+        "            match hooks\n"
+        "                .run_before_llm_call(&mut provider_request_messages, &mut candidate_model)\n"
+        "                .await\n",
+        "            let trust_context = crate::hooks::trust::classify_messages(\n"
+        "                &provider_request_messages,\n"
+        "                Some(ingress.trust),\n"
+        "            );\n"
+        "            match hooks\n"
+        "                .run_before_llm_call_with_context(\n"
+        "                    &trust_context,\n"
+        "                    &mut provider_request_messages,\n"
+        "                    &mut candidate_model,\n"
+        "                )\n"
+        "                .await\n",
+    )
+
+    # The max-iteration path has no turn envelope to consult; the classifier
+    # still marks tool output and externally-framed payloads untrusted.
+    replace_required(
+        source / "crates/zeroclaw-runtime/src/agent/turn/max_iter.rs",
+        "            if let Some(hooks) = hooks.filter(|hooks| !hooks.is_empty())\n"
+        "                && let crate::hooks::HookResult::Cancel(reason) = hooks\n"
+        "                    .run_before_llm_call(&mut messages, &mut selected_model)\n"
+        "                    .await\n",
+        "            let trust_context = crate::hooks::trust::classify_messages(&messages, None);\n"
+        "            if let Some(hooks) = hooks.filter(|hooks| !hooks.is_empty())\n"
+        "                && let crate::hooks::HookResult::Cancel(reason) = hooks\n"
+        "                    .run_before_llm_call_with_context(\n"
+        "                        &trust_context,\n"
+        "                        &mut messages,\n"
+        "                        &mut selected_model,\n"
+        "                    )\n"
+        "                    .await\n",
+    )
+
+
+def project_enact_hooks_docs(source):
+    """Ship the hooks documentation page.
+
+    The hook system had no page in `docs/book/src/`, so an operator had no
+    written contract for the decision vocabulary, the fail-open rule, or the
+    trusted/untrusted split. The page is overlay-authored and copied into the
+    prepared source; the book index and the developing index link to it.
+    """
+    overlay = ROOT / "overlays/enact/native/docs/hooks.md"
+    target = source / "docs/book/src/developing/hooks.md"
+    if target.exists():
+        raise RuntimeError(f"Upstream overlay drift: hooks docs page already exists at {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(overlay, target)
+
+    replace_required(
+        source / "docs/book/src/SUMMARY.md",
+        "  - [Built-in tool inventory](./developing/tool-inventory.md)\n",
+        "  - [Built-in tool inventory](./developing/tool-inventory.md)\n"
+        "  - [Hooks](./developing/hooks.md)\n",
+    )
+
+    replace_required(
+        source / "docs/book/src/developing/index.md",
+        "- [Built-in tool inventory](./tool-inventory.md)\n",
+        "- [Built-in tool inventory](./tool-inventory.md)\n"
+        "- [Hooks](./hooks.md)\n",
+    )
+
+
+def project_enact_context_tools(source):
+    """Ship the context and code-intelligence tools.
+
+    Seven new tools and one extended one:
+
+    * `compose` — one call that ranks the workspace against a task and inlines
+      the best files, replacing a search-then-read-then-read chain.
+    * `expand` — retrieve a tool output that was archived because it was too
+      large for the conversation, so any compression stays lossless.
+    * `ast_grep` / `ast_edit` — structural code queries and previewed
+      structural rewrites, driven by the ast-grep binary.
+    * `callgraph` / `graph` — blast-radius analysis at symbol and file
+      granularity.
+    * `radar` — context budget attribution: where the window actually went.
+    * `file_read` read modes — signatures, outline, diff, anchored, task.
+
+    The runtime gains two small modules they share: the tool-output archive
+    and the context ledger.
+
+    Every file is overlay-authored and copied into the prepared source, so no
+    tracked `src/` or `crates/` Rust changes and no `Cargo.toml` / `Cargo.lock`
+    churn.
+    """
+    overlay = ROOT / "overlays/enact/native/tools"
+    tools = source / "crates/zeroclaw-runtime/src/tools"
+
+    for name in (
+        "ast_grep",
+        "callgraph",
+        "compose",
+        "expand",
+        "file_read_modes",
+        "radar",
+        "workspace_scan",
+    ):
+        target = tools / f"{name}.rs"
+        if target.exists():
+            raise RuntimeError(f"Upstream overlay drift: tool module already exists at {target}")
+        shutil.copy2(overlay / f"{name}.rs", target)
+
+    for name, destination in (
+        ("tool_archive", "crates/zeroclaw-runtime/src/tool_archive.rs"),
+        ("context_ledger", "crates/zeroclaw-runtime/src/context_ledger.rs"),
+    ):
+        target = source / destination
+        if target.exists():
+            raise RuntimeError(f"Upstream overlay drift: module already exists at {target}")
+        shutil.copy2(overlay / f"{name}.rs", target)
+
+    runtime_tools = source / "crates/zeroclaw-runtime/src/tools/mod.rs"
+
+    # ── module declarations, in the file's alphabetical order ────────────
+    replace_required(
+        runtime_tools,
+        "pub mod cron_add;\n",
+        "pub mod ast_grep;\npub mod callgraph;\npub mod compose;\npub mod cron_add;\n",
+    )
+    replace_required(
+        runtime_tools,
+        "pub mod deliver_file;\n",
+        "pub mod deliver_file;\npub mod expand;\n",
+    )
+    replace_required(
+        runtime_tools,
+        "pub mod file_read;\n",
+        "pub mod file_read;\npub mod file_read_modes;\n",
+    )
+    replace_required(
+        runtime_tools,
+        "pub mod scoped;\n",
+        "pub mod radar;\npub mod scoped;\n",
+    )
+    replace_required(
+        runtime_tools,
+        "pub mod verifiable_intent;\n",
+        "pub mod verifiable_intent;\npub mod workspace_scan;\n",
+    )
+
+    # ── re-exports ───────────────────────────────────────────────────────
+    replace_required(
+        runtime_tools,
+        "pub use file_read::FileReadTool;\n",
+        "pub use ast_grep::{AstEditTool, AstGrepTool};\n"
+        "pub use callgraph::{CallGraphTool, GraphTool};\n"
+        "pub use compose::ComposeTool;\n"
+        "pub use expand::ExpandTool;\n"
+        "pub use file_read::FileReadTool;\n"
+        "pub use radar::RadarTool;\n",
+    )
+
+    # ── attribution: the new tools are first-party native code ───────────
+    attribution = source / "crates/zeroclaw-runtime/src/tools/attribution.rs"
+    replace_required(
+        attribution,
+        "use crate::tools::cron_add::CronAddTool;\n",
+        "use crate::tools::ast_grep::{AstEditTool, AstGrepTool};\n"
+        "use crate::tools::callgraph::{CallGraphTool, GraphTool};\n"
+        "use crate::tools::compose::ComposeTool;\n"
+        "use crate::tools::cron_add::CronAddTool;\n"
+        "use crate::tools::expand::ExpandTool;\n"
+        "use crate::tools::radar::RadarTool;\n",
+    )
+    replace_required(
+        attribution,
+        "tool_attribution!(CronAddTool, ToolKind::Plugin);\n",
+        "tool_attribution!(AstEditTool, ToolKind::Plugin);\n"
+        "tool_attribution!(AstGrepTool, ToolKind::Plugin);\n"
+        "tool_attribution!(CallGraphTool, ToolKind::Plugin);\n"
+        "tool_attribution!(ComposeTool, ToolKind::Plugin);\n"
+        "tool_attribution!(CronAddTool, ToolKind::Plugin);\n"
+        "tool_attribution!(ExpandTool, ToolKind::Plugin);\n"
+        "tool_attribution!(GraphTool, ToolKind::Plugin);\n"
+        "tool_attribution!(RadarTool, ToolKind::Plugin);\n",
+    )
+
+    # ── registration in the full registry ────────────────────────────────
+    replace_required(
+        runtime_tools,
+        '    register_tool!("calculator", Arc::new(CalculatorTool::new()));\n',
+        '    register_tool!("compose", Arc::new(ComposeTool::new(security.clone())));\n'
+        '    register_tool!("expand", Arc::new(ExpandTool::new(security.clone())));\n'
+        '    register_tool!("ast_grep", Arc::new(AstGrepTool::new(security.clone())));\n'
+        '    register_tool!("ast_edit", Arc::new(AstEditTool::new(security.clone())));\n'
+        '    register_tool!("callgraph", Arc::new(CallGraphTool::new(security.clone())));\n'
+        '    register_tool!("graph", Arc::new(GraphTool::new(security.clone())));\n'
+        '    register_tool!("radar", Arc::new(RadarTool::new()));\n'
+        '    register_tool!("calculator", Arc::new(CalculatorTool::new()));\n',
+    )
+
+    # ── the two runtime modules ──────────────────────────────────────────
+    replace_required(
+        source / "crates/zeroclaw-runtime/src/lib.rs",
+        "pub mod cost;\n",
+        "pub mod context_ledger;\npub mod cost;\n",
+    )
+    replace_required(
+        source / "crates/zeroclaw-runtime/src/lib.rs",
+        "pub mod tools;\n",
+        "pub mod tool_archive;\npub mod tools;\n",
+    )
+
+    # ── file_read read modes ─────────────────────────────────────────────
+    file_read = source / "crates/zeroclaw-runtime/src/tools/file_read.rs"
+    replace_required(
+        file_read,
+        '                "encoding": {\n',
+        '                "mode": {\n'
+        '                    "type": "string",\n'
+        '                    "enum": ["full", "signatures", "outline", "diff", "anchored", "task"],\n'
+        '                    "description": "How to read the file. \'full\' (default) reads every line. \'signatures\' lists the declarations. \'outline\' shows the structure. \'diff\' compares against \'base\' or \'base_path\'. \'anchored\' shows the lines around \'anchor\'. \'task\' shows the lines that mention \'task\'."\n'
+        '                },\n'
+        '                "anchor": {\n'
+        '                    "type": "string",\n'
+        '                    "description": "The text to find, for mode=\'anchored\'."\n'
+        '                },\n'
+        '                "task": {\n'
+        '                    "type": "string",\n'
+        '                    "description": "What to look for, for mode=\'task\'."\n'
+        '                },\n'
+        '                "base": {\n'
+        '                    "type": "string",\n'
+        '                    "description": "The previous text, for mode=\'diff\'."\n'
+        '                },\n'
+        '                "base_path": {\n'
+        '                    "type": "string",\n'
+        '                    "description": "The previous file, for mode=\'diff\'."\n'
+        '                },\n'
+        '                "context": {\n'
+        '                    "type": "integer",\n'
+        '                    "description": "Lines of context around an anchor or a task match (default 3)."\n'
+        '                },\n'
+        '                "encoding": {\n',
+    )
+
+    replace_required(
+        file_read,
+        "        match tokio::fs::read_to_string(&resolved_path).await {\n"
+        "            Ok(contents) => {\n",
+        "        match tokio::fs::read_to_string(&resolved_path).await {\n"
+        "            Ok(contents) => {\n"
+        "                match crate::tools::file_read_modes::parse_mode(\n"
+        "                    args.get(\"mode\").and_then(|v| v.as_str()),\n"
+        "                ) {\n"
+        "                    Ok(Some(mode)) => {\n"
+        "                        let mut mode_args = args.clone();\n"
+        "                        if let Some(base_path) = args.get(\"base_path\").and_then(|v| v.as_str()) {\n"
+        "                            let base_full = self.resolve_candidate(base_path)?;\n"
+        "                            let base_resolved = tokio::fs::canonicalize(&base_full).await.map_err(|e| {\n"
+        "                                anyhow::Error::msg(format!(\"Failed to resolve base path: {e}\"))\n"
+        "                            })?;\n"
+        "                            if !self.security.is_resolved_path_readable(&base_resolved) {\n"
+        "                                anyhow::bail!(\"Path escapes workspace directory: {base_path}\");\n"
+        "                            }\n"
+        "                            let base_text = tokio::fs::read_to_string(&base_resolved).await.map_err(|e| {\n"
+        "                                anyhow::Error::msg(format!(\"Failed to read base file: {e}\"))\n"
+        "                            })?;\n"
+        "                            mode_args[\"base\"] = serde_json::Value::String(base_text);\n"
+        "                        }\n"
+        "                        return Ok(crate::tools::file_read_modes::render(\n"
+        "                            mode,\n"
+        "                            &contents,\n"
+        "                            &resolved_path,\n"
+        "                            &mode_args,\n"
+        "                        ));\n"
+        "                    }\n"
+        "                    Ok(None) => {}\n"
+        "                    Err(message) => {\n"
+        "                        return Ok(ToolResult {\n"
+        "                            success: false,\n"
+        "                            output: ToolOutput::default(),\n"
+        "                            error: Some(message),\n"
+        "                        });\n"
+        "                    }\n"
+        "                }\n",
+    )
+
+    # ── the tool-output archive ──────────────────────────────────────────
+    replace_required(
+        source / "crates/zeroclaw-runtime/src/agent/turn/post_exec.rs",
+        "        // ── Progress: tool completion ───────────────────────\n",
+        "        // ── Archive: a result too large for the conversation ───────\n"
+        "        // The full text goes to the archive and the model keeps a head\n"
+        "        // plus a handle, so `expand` can give the rest back later.\n"
+        "        if outcome.output.chars().count() > crate::tool_archive::ARCHIVE_THRESHOLD_CHARS\n"
+        "            && let Some(handle) = crate::tool_archive::archive(&call.name, &outcome.output)\n"
+        "        {\n"
+        "            let archived = crate::tool_archive::archived_text(&handle, &outcome.output);\n"
+        "            outcome.output = archived;\n"
+        "        }\n"
+        "\n"
+        "        // ── Progress: tool completion ───────────────────────\n",
+    )
+
+    # ── the context ledger ──────────────────────────────────────────────
+    replace_required(
+        source / "crates/zeroclaw-runtime/src/agent/turn/mod.rs",
+        "                crate::hooks::HookResult::Cancel(reason) => {\n"
+        "                    anyhow::bail!(\"LLM call cancelled by hook: {reason}\");\n"
+        "                }\n"
+        "            }\n"
+        "        }\n",
+        "                crate::hooks::HookResult::Cancel(reason) => {\n"
+        "                    anyhow::bail!(\"LLM call cancelled by hook: {reason}\");\n"
+        "                }\n"
+        "            }\n"
+        "            // Account for where this request's context went, so `radar`\n"
+        "            // can say which source spent the window.\n"
+        "            crate::context_ledger::record(crate::context_ledger::account(\n"
+        "                turn_id,\n"
+        "                agent_alias,\n"
+        "                &provider_request_messages,\n"
+        "                injected_memory_preamble.as_ref().map(|preamble| preamble.index),\n"
+        "            ));\n"
+        "        }\n",
+    )
+
+    # ── the inventory rows ───────────────────────────────────────────────
+    inventory = source / "crates/zeroclaw-tools/src/inventory.rs"
+    replace_required(
+        inventory,
+        "    // Tier 3: optional. Utilities.\n",
+        "    // Tier 2: host-coupled. Context and code intelligence.\n"
+        + "".join(
+            "    BuiltinToolSpec {\n"
+            f'        name: "{name}",\n'
+            "        tier: ToolTier::Host,\n"
+            "        compilation: BuiltinToolCompilation::Always,\n"
+            "    },\n"
+            for name in (
+                "compose",
+                "expand",
+                "ast_grep",
+                "ast_edit",
+                "callgraph",
+                "graph",
+                "radar",
+            )
+        )
+        + "    // Tier 3: optional. Utilities.\n",
+    )
+
+    # ── the inventory docs page ──────────────────────────────────────────
+    replace_required(
+        source / "docs/book/src/developing/tool-inventory.md",
+        "| Runtime-defined | `security_ops` | Lives in the runtime crate and uses its security playbook and vulnerability modules. |\n",
+        "| Runtime-defined | `security_ops` | Lives in the runtime crate and uses its security playbook and vulnerability modules. |\n"
+        "| Context and code intelligence | `compose`, `expand`, `ast_grep`, `ast_edit`, `callgraph`, `graph`, `radar` | The context-assembly and code-intelligence surface. `compose` ranks the workspace against a task and inlines it; `expand` retrieves a tool output that was archived for being too large; `ast_grep` and `ast_edit` drive the ast-grep binary for structural queries and previewed rewrites; `callgraph` and `graph` answer the blast-radius question a content search cannot; `radar` reports where the context window went. They run behind the same path guard as the file tools. |\n",
+    )
+
+
+def project_enact_tool_families(source):
+    """Consolidate the sibling tools into canonical family tools.
+
+    Thirty-six sibling tools used together all the time were thirty-six
+    entries in the model's tool list. Each family below collapses into one
+    canonical tool with a typed `action` enum — `cron` with `add`, `list`,
+    `remove`, `update`, `run`, `runs`, `schedule`.
+
+    The legacy names keep working. A call to `cron_add` still schedules a
+    job, and it carries a one-time notice naming the canonical tool and the
+    action that replaces it. The notice travels beside the result body, in
+    the structured data, so the body stays exactly what the tool produced.
+    """
+    overlay = ROOT / "overlays/enact/native/tools/families.rs"
+    target = source / "crates/zeroclaw-runtime/src/tools/families.rs"
+    if target.exists():
+        raise RuntimeError(f"Upstream overlay drift: families module already exists at {target}")
+    shutil.copy2(overlay, target)
+
+    # The family table must agree with the operations inventory and with the
+    # tools it describes, or the native surface and the canonical registry
+    # would offer different actions under the same name.
+    check_enact_family_members(source)
+
+    runtime_tools = source / "crates/zeroclaw-runtime/src/tools/mod.rs"
+
+    replace_required(
+        runtime_tools,
+        "pub mod file_read;\n",
+        "pub mod families;\npub mod file_read;\n",
+    )
+    replace_required(
+        runtime_tools,
+        "pub use file_read::FileReadTool;\n",
+        "pub use families::FamilyTool;\npub use file_read::FileReadTool;\n",
+    )
+
+    # ── register the family tools beside their members ──────────────────
+    replace_required(
+        runtime_tools,
+        "    let tools = native_memory.wrap_actual_tools(&tool_arcs);\n    Ok(AllToolsResult {\n",
+        "    // The consolidated families: one canonical tool per family, with a\n"
+        "    // typed action enum over the legacy members. The members stay\n"
+        "    // registered; the family is the name the model should learn.\n"
+        "    for (family_name, family_tool) in crate::tools::families::build_all(&tool_arcs) {\n"
+        "        register_builtin_tool(\n"
+        "            &root_config.tools,\n"
+        "            &mut tool_arcs,\n"
+        "            &mut reserved_host_names,\n"
+        "            family_name,\n"
+        "            || Arc::new(family_tool),\n"
+        "        );\n"
+        "    }\n"
+        "\n"
+        "    let tools = native_memory.wrap_actual_tools(&tool_arcs);\n"
+        "    Ok(AllToolsResult {\n",
+    )
+
+    # ── the one-time deprecation notice ─────────────────────────────────
+    tool_execution = source / "crates/zeroclaw-runtime/src/agent/tool_execution.rs"
+    replace_required(
+        tool_execution,
+        "                    Ok(ToolExecutionOutcome {\n"
+        "                        output: normalized_output.to_string(),\n"
+        "                        attachments: r.output.attachments().to_vec(),\n"
+        "                        output_data: r.output.into_data(),\n",
+        "                    // Take the body text before the output is consumed:\n"
+        "                    // the notice travels in the structured data, and the\n"
+        "                    // body stays exactly what the tool produced.\n"
+        "                    let output_text = normalized_output.to_string();\n"
+        "                    let attachments = r.output.attachments().to_vec();\n"
+        "                    let mut output_data = r.output.into_data();\n"
+        "                    // A legacy tool name carries a one-time notice\n"
+        "                    // naming its canonical form, beside the result body.\n"
+        "                    crate::tools::families::attach_deprecation_notice(\n"
+        "                        call_name,\n"
+        "                        &mut output_data,\n"
+        "                    );\n"
+        "                    Ok(ToolExecutionOutcome {\n"
+        "                        output: output_text,\n"
+        "                        attachments,\n"
+        "                        output_data,\n",
+    )
+
+    replace_required(
+        tool_execution,
+        "                    Ok(ToolExecutionOutcome {\n"
+        "                        output: format!(\"Error: {model_visible}\"),\n"
+        "                        success: false,\n"
+        "                        error_reason: Some(reason),\n"
+        "                        duration,\n"
+        "                        receipt: None,\n"
+        "                        attachments,\n"
+        "                        output_data,\n"
+        "                    })\n",
+        "                    let mut output_data = output_data;\n"
+        "                    crate::tools::families::attach_deprecation_notice(\n"
+        "                        call_name,\n"
+        "                        &mut output_data,\n"
+        "                    );\n"
+        "                    Ok(ToolExecutionOutcome {\n"
+        "                        output: format!(\"Error: {model_visible}\"),\n"
+        "                        success: false,\n"
+        "                        error_reason: Some(reason),\n"
+        "                        duration,\n"
+        "                        receipt: None,\n"
+        "                        attachments,\n"
+        "                        output_data,\n"
+        "                    })\n",
+    )
+
+    # ── the MCP surface renders the notice beside the body ─────────────
+    # The notice support is baked into the overlay-owned MCP module, not
+    # patched into it here: the module is ours, so it ships in final form.
+    # Patching our own overlay in place would not be idempotent — a second
+    # `prepare` would find the anchor already replaced.
+    protocol = ROOT / "overlays/enact/native/mcp-server/src/protocol.rs"
+    mcp_server = ROOT / "overlays/enact/native/mcp-server/src/server.rs"
+    for path, needle in (
+        (protocol, "pub fn tool_result_with_notice("),
+        (mcp_server, "tool_result_with_notice(text, &notice)"),
+    ):
+        text = path.read_text()
+        if text.count(needle) != 1:
+            raise RuntimeError(
+                f"Upstream overlay drift: expected exactly one {needle!r} in {path}"
+            )
+
+    # ── the inventory rows ──────────────────────────────────────────────
+    inventory = source / "crates/zeroclaw-tools/src/inventory.rs"
+    replace_required(
+        inventory,
+        "    // Tier 3: optional. Utilities.\n",
+        "    // Tier 2: host-coupled. The consolidated families.\n"
+        + "".join(
+            "    BuiltinToolSpec {\n"
+            f'        name: "{name}",\n'
+            "        tier: ToolTier::Host,\n"
+            "        compilation: BuiltinToolCompilation::Always,\n"
+            "    },\n"
+            for name in (
+                "cron",
+                "sop",
+                "memory",
+                "a2a",
+                "sessions",
+                "model",
+                "mcp",
+                "cloud",
+                "file_uploads",
+                "email",
+            )
+        )
+        + "    // Tier 3: optional. Utilities.\n",
+    )
+
+    # ── the inventory docs page ──────────────────────────────────────────
+    replace_required(
+        source / "docs/book/src/developing/tool-inventory.md",
+        "| Context and code intelligence | `compose`, `expand`, `ast_grep`, `ast_edit`, `callgraph`, `graph`, `radar` |",
+        "| Consolidated families | `cron`, `sop`, `memory`, `a2a`, `sessions`, `model`, `mcp`, `cloud`, `file_uploads`, `email` | Each family is one canonical tool with a typed `action` enum over the sibling tools it replaces. The legacy names keep working and carry a one-time notice naming the canonical form. |\n"
+        "| Context and code intelligence | `compose`, `expand`, `ast_grep`, `ast_edit`, `callgraph`, `graph`, `radar` |",
+    )
+
+    # ── the model sees the family, not the members ───────────────────────
+    # The members stay in the registry: a config, a script, or a model that
+    # remembers the old name can still call them, and the call carries a
+    # one-time notice. What the model is *offered* is the family, so the
+    # consolidation actually removes the thirty-six entries from the tool
+    # list instead of adding ten to it.
+    replace_required(
+        source / "crates/zeroclaw-runtime/src/agent/turn/tool_specs.rs",
+        "    let mut tool_specs: Vec<crate::tools::ToolSpec> = tools_registry\n"
+        "        .iter()\n"
+        "        .filter(|tool| !excluded_tools.iter().any(|ex| ex == tool.name()))\n",
+        "    let mut tool_specs: Vec<crate::tools::ToolSpec> = tools_registry\n"
+        "        .iter()\n"
+        "        .filter(|tool| !excluded_tools.iter().any(|ex| ex == tool.name()))\n"
+    )
+
+    # ── the family tools that need a live server to exist ────────────────
+    # The `mcp` family collapses `mcp_resources` and `mcp_prompts`, which are
+    # only built when MCP is enabled and a server advertises something. The
+    # family therefore cannot be constructed in a maximal-config unit test,
+    # for the same reason upstream allowlists `tool_search`.
+    replace_required(
+        source / "crates/zeroclaw-runtime/src/tools/mod.rs",
+        '        let unconstructible = std::collections::BTreeMap::from([(\n'
+        '            "tool_search",\n',
+        '        let unconstructible = std::collections::BTreeMap::from([(\n'
+        '            "mcp",\n'
+        '            "the family collapses `mcp_resources` and `mcp_prompts`, which are \\\n'
+        '             built only when MCP is enabled and a connected server advertises \\\n'
+        '             at least one tool",\n'
+        '        ), (\n'
+        '            "tool_search",\n',
+    )
+
+
+def project_enact_coordination(source):
+    """Ship the coordination primitives: `wait`, and the approval tiers.
+
+    `wait` is the blocking form of "what happened to that background task":
+    name the task, get the outcome when it lands, with a bounded budget so a
+    stuck task cannot hang the turn forever. It reads the durable task
+    registry the delegate and subagent producers already write to, so it adds
+    no new lifecycle state.
+
+    The approval tiers give the operator a vocabulary that does not rot as
+    the tool list changes: read, write, exec. A policy entry may name a tier
+    — `auto_approve = ["read"]` — instead of a list of readers. A tier never
+    widens what the policy already allows; it only lets the policy be
+    written in terms of what a tool does.
+
+    A consolidated family is judged by the member its action names, so
+    `memory` with the `recall` action carries the policy of
+    `memory_recall`: the consolidation does not quietly change what an
+    operator's configuration means.
+    """
+    runtime_tools = source / "crates/zeroclaw-runtime/src/tools/mod.rs"
+
+    # ── the approval tiers ─────────────────────────────────────────────
+    overlay = ROOT / "overlays/enact/native/approval/tiers.rs"
+    target = source / "crates/zeroclaw-runtime/src/approval/tiers.rs"
+    if target.exists():
+        raise RuntimeError(
+            f"Upstream overlay drift: the approval tiers module already exists at {target}"
+        )
+    shutil.copy2(overlay, target)
+
+    approval = source / "crates/zeroclaw-runtime/src/approval/mod.rs"
+    replace_required(
+        approval,
+        "use crate::security::AutonomyLevel;\n",
+        "pub mod tiers;\n\n"
+        "use crate::approval::tiers::ApprovalTier;\n"
+        "use crate::security::AutonomyLevel;\n",
+    )
+    replace_required(
+        approval,
+        "    /// Check whether a tool call requires interactive approval.\n"
+        "    /// Returns `true` if the call needs a prompt, `false` if it can proceed.\n"
+        "    pub fn needs_approval(&self, tool_name: &str) -> bool {\n"
+        "        self.approval_requirement(tool_name) == ApprovalRequirement::Prompt\n"
+        "    }\n"
+        "\n"
+        "    pub fn approval_requirement(&self, tool_name: &str) -> ApprovalRequirement {\n"
+        "        // ReadOnly blocks everything — handled elsewhere; no prompt needed.\n"
+        "        if self.autonomy_level == AutonomyLevel::ReadOnly {\n"
+        "            return ApprovalRequirement::NotRequired;\n"
+        "        }\n"
+        "\n"
+        "        // always_ask overrides everything, including Full autonomy — an operator\n"
+        "        // who explicitly lists a tool here wants a prompt regardless of level.\n"
+        "        if self.always_ask.contains(\"*\") || self.always_ask.contains(tool_name) {\n"
+        "            return ApprovalRequirement::Prompt;\n"
+        "        }\n"
+        "\n"
+        "        // Full autonomy auto-approves only tools that are not always_ask.\n"
+        "        if self.autonomy_level == AutonomyLevel::Full {\n"
+        "            return ApprovalRequirement::Approved;\n"
+        "        }\n"
+        "\n"
+        "        if self.non_interactive\n"
+        "            && tool_name == \"shell\"\n"
+        "            && !self.non_interactive_shell_requires_approval\n"
+        "        {\n"
+        "            return ApprovalRequirement::NotRequired;\n"
+        "        }\n"
+        "\n"
+        "        // auto_approve skips the prompt.\n"
+        "        if self.auto_approve.contains(\"*\") || self.auto_approve.contains(tool_name) {\n"
+        "            return ApprovalRequirement::Approved;\n"
+        "        }\n"
+        "\n"
+        "        // Session allowlist (from prior \"Always\" responses).\n"
+        "        let allowlist = self.session_allowlist.lock();\n"
+        "        if allowlist.contains(tool_name) {\n"
+        "            return ApprovalRequirement::Approved;\n"
+        "        }\n"
+        "\n"
+        "        // Default: supervised mode requires approval.\n"
+        "        ApprovalRequirement::Prompt\n"
+        "    }\n",
+        "    /// Check whether a tool call requires interactive approval.\n"
+        "    /// Returns `true` if the call needs a prompt, `false` if it can proceed.\n"
+        "    pub fn needs_approval(&self, tool_name: &str) -> bool {\n"
+        "        self.approval_requirement(tool_name) == ApprovalRequirement::Prompt\n"
+        "    }\n"
+        "\n"
+        "    /// Check whether a call with an action requires interactive approval.\n"
+        "    ///\n"
+        "    /// A consolidated family is judged by the member its action names, so\n"
+        "    /// `memory` with the `recall` action carries the policy of\n"
+        "    /// `memory_recall`.\n"
+        "    pub fn needs_approval_for(&self, tool_name: &str, action: Option<&str>) -> bool {\n"
+        "        self.approval_requirement_for(tool_name, action) == ApprovalRequirement::Prompt\n"
+        "    }\n"
+        "\n"
+        "    /// The tier a call falls into: read, write, or exec.\n"
+        "    pub fn approval_tier(&self, tool_name: &str, action: Option<&str>) -> ApprovalTier {\n"
+        "        crate::approval::tiers::tier_for_call(tool_name, action)\n"
+        "    }\n"
+        "\n"
+        "    pub fn approval_requirement(&self, tool_name: &str) -> ApprovalRequirement {\n"
+        "        self.approval_requirement_for(tool_name, None)\n"
+        "    }\n"
+        "\n"
+        "    /// The approval requirement for one call.\n"
+        "    ///\n"
+        "    /// The names the call may be judged by are the canonical tool and, for\n"
+        "    /// a consolidated family, the member the action names. The tier is the\n"
+        "    /// member's, so a policy entry may name a tier instead of a tool.\n"
+        "    pub fn approval_requirement_for(\n"
+        "        &self,\n"
+        "        tool_name: &str,\n"
+        "        action: Option<&str>,\n"
+        "    ) -> ApprovalRequirement {\n"
+        "        // ReadOnly blocks everything — handled elsewhere; no prompt needed.\n"
+        "        if self.autonomy_level == AutonomyLevel::ReadOnly {\n"
+        "            return ApprovalRequirement::NotRequired;\n"
+        "        }\n"
+        "\n"
+        "        let names = self.policy_names(tool_name, action);\n"
+        "        let tier = crate::approval::tiers::tier_for_call(tool_name, action);\n"
+        "\n"
+        "        // always_ask overrides everything, including Full autonomy — an operator\n"
+        "        // who explicitly lists a tool here wants a prompt regardless of level.\n"
+        "        if self.matches_policy(&self.always_ask, &names, tier) {\n"
+        "            return ApprovalRequirement::Prompt;\n"
+        "        }\n"
+        "\n"
+        "        // Full autonomy auto-approves only tools that are not always_ask.\n"
+        "        if self.autonomy_level == AutonomyLevel::Full {\n"
+        "            return ApprovalRequirement::Approved;\n"
+        "        }\n"
+        "\n"
+        "        if self.non_interactive\n"
+        "            && tool_name == \"shell\"\n"
+        "            && !self.non_interactive_shell_requires_approval\n"
+        "        {\n"
+        "            return ApprovalRequirement::NotRequired;\n"
+        "        }\n"
+        "\n"
+        "        // auto_approve skips the prompt.\n"
+        "        if self.matches_policy(&self.auto_approve, &names, tier) {\n"
+        "            return ApprovalRequirement::Approved;\n"
+        "        }\n"
+        "\n"
+        "        // Session allowlist (from prior \"Always\" responses).\n"
+        "        let allowlist = self.session_allowlist.lock();\n"
+        "        if names.iter().any(|name| allowlist.contains(name)) {\n"
+        "            return ApprovalRequirement::Approved;\n"
+        "        }\n"
+        "\n"
+        "        // Default: supervised mode requires approval.\n"
+        "        ApprovalRequirement::Prompt\n"
+        "    }\n"
+        "\n"
+        "    /// The names a call may be judged by.\n"
+        "    ///\n"
+        "    /// A consolidated family is judged by its canonical name and by the\n"
+        "    /// member tool the action names: an operator who listed `memory_recall`\n"
+        "    /// must keep approving nothing for a read, whether the model spells it\n"
+        "    /// `memory_recall` or `memory` with the `recall` action.\n"
+        "    fn policy_names(&self, tool_name: &str, action: Option<&str>) -> Vec<String> {\n"
+        "        let mut names = vec![tool_name.to_string()];\n"
+        "        if let Some((member, _)) = crate::tools::families::resolve(tool_name, action)\n"
+        "            && member != tool_name\n"
+        "        {\n"
+        "            names.push(member.to_string());\n"
+        "        }\n"
+        "        names\n"
+        "    }\n"
+        "\n"
+        "    /// Whether a policy list covers a call.\n"
+        "    ///\n"
+        "    /// A policy entry names a tool, a tier, or `*`. A tier entry covers every\n"
+        "    /// call in that tier, so an operator can write `auto_approve = [\"read\"]`\n"
+        "    /// instead of maintaining a list of readers.\n"
+        "    fn matches_policy(\n"
+        "        &self,\n"
+        "        entries: &HashSet<String>,\n"
+        "        names: &[String],\n"
+        "        tier: ApprovalTier,\n"
+        "    ) -> bool {\n"
+        "        if entries.contains(\"*\") {\n"
+        "            return true;\n"
+        "        }\n"
+        "        if names.iter().any(|name| entries.contains(name)) {\n"
+        "            return true;\n"
+        "        }\n"
+        "        entries\n"
+        "            .iter()\n"
+        "            .any(|entry| ApprovalTier::parse(entry) == Some(tier))\n"
+        "    }\n",
+    )
+    replace_required(
+        approval,
+        "            && !self.always_ask.contains(\"*\")\n"
+        "            && !self.always_ask.contains(tool_name)\n",
+        "            && !self.always_ask.contains(\"*\")\n"
+        "            && !self.always_ask.contains(tool_name)\n"
+        "            && !self.always_ask.iter().any(|entry| {\n"
+        "                ApprovalTier::parse(entry)\n"
+        "                    == Some(crate::approval::tiers::tier_for(tool_name))\n"
+        "            })\n",
+    )
+
+    # ── the call sites know the action ─────────────────────────────────
+    replace_required(
+        source / "crates/zeroclaw-runtime/src/agent/turn/approval_gate.rs",
+        "    let mut approval_requirement = ctx\n"
+        "        .approval\n"
+        "        .map(|mgr| mgr.approval_requirement(tool_name))\n"
+        "        .unwrap_or(ApprovalRequirement::NotRequired);\n",
+        "    let mut approval_requirement = ctx\n"
+        "        .approval\n"
+        "        .map(|mgr| {\n"
+        "            mgr.approval_requirement_for(\n"
+        "                tool_name,\n"
+        "                tool_args.get(\"action\").and_then(|value| value.as_str()),\n"
+        "            )\n"
+        "        })\n"
+        "        .unwrap_or(ApprovalRequirement::NotRequired);\n",
+    )
+    replace_required(
+        source / "crates/zeroclaw-runtime/src/agent/turn/call_prep.rs",
+        "        let requires_prompt = ctx\n"
+        "            .approval\n"
+        "            .map(|mgr| mgr.needs_approval(&tool_name))\n"
+        "            .unwrap_or(false);\n",
+        "        let requires_prompt = ctx\n"
+        "            .approval\n"
+        "            .map(|mgr| {\n"
+        "                mgr.needs_approval_for(\n"
+        "                    &tool_name,\n"
+        "                    tool_args.get(\"action\").and_then(|value| value.as_str()),\n"
+        "                )\n"
+        "            })\n"
+        "            .unwrap_or(false);\n",
+    )
+    replace_required(
+        source / "crates/zeroclaw-runtime/src/agent/tool_execution.rs",
+        "    if let Some(mgr) = approval\n"
+        "        && tool_calls.iter().any(|call| mgr.needs_approval(&call.name))\n"
+        "    {\n",
+        "    if let Some(mgr) = approval\n"
+        "        && tool_calls.iter().any(|call| {\n"
+        "            mgr.needs_approval_for(\n"
+        "                &call.name,\n"
+        "                call.arguments.get(\"action\").and_then(|value| value.as_str()),\n"
+        "            )\n"
+        "        })\n"
+        "    {\n",
+    )
+
+    # ── the `wait` tool ────────────────────────────────────────────────
+    overlay = ROOT / "overlays/enact/native/tools/wait_task.rs"
+    target = source / "crates/zeroclaw-runtime/src/tools/wait_task.rs"
+    if target.exists():
+        raise RuntimeError(f"Upstream overlay drift: wait module already exists at {target}")
+    shutil.copy2(overlay, target)
+
+    replace_required(
+        runtime_tools,
+        "pub mod verifiable_intent;\n",
+        "pub mod verifiable_intent;\npub mod wait_task;\n",
+    )
+    replace_required(
+        runtime_tools,
+        "pub use file_read::FileReadTool;\n",
+        "pub use file_read::FileReadTool;\npub use wait_task::WaitTool;\n",
+    )
+    replace_required(
+        runtime_tools,
+        '    register_tool!("calculator", Arc::new(CalculatorTool::new()));\n',
+        '    register_tool!("calculator", Arc::new(CalculatorTool::new()));\n'
+        "    // `wait` blocks on the durable task registry the background\n"
+        "    // producers write to. The store is opened on demand, so the tool\n"
+        "    // exists in every configuration.\n"
+        "    register_tool!(\n"
+        '        "wait",\n'
+        "        Arc::new(WaitTool::from_data_dir(\n"
+        "            root_config.data_dir.clone(),\n"
+        "            Some(agent_alias.to_string()),\n"
+        "        ))\n"
+        "    );\n",
+    )
+
+    # ── attribution: the new tool is first-party native code ───────────
+    attribution = source / "crates/zeroclaw-runtime/src/tools/attribution.rs"
+    replace_required(
+        attribution,
+        "use crate::tools::verifiable_intent::VerifiableIntentTool;\n",
+        "use crate::tools::verifiable_intent::VerifiableIntentTool;\n"
+        "use crate::tools::wait_task::WaitTool;\n",
+    )
+    replace_required(
+        attribution,
+        "tool_attribution!(VerifiableIntentTool, ToolKind::Plugin);\n",
+        "tool_attribution!(VerifiableIntentTool, ToolKind::Plugin);\n"
+        "tool_attribution!(WaitTool, ToolKind::Plugin);\n",
+    )
+
+    # ── the `learn` tool ───────────────────────────────────────────────
+    overlay = ROOT / "overlays/enact/native/tools/learn.rs"
+    target = source / "crates/zeroclaw-runtime/src/tools/learn.rs"
+    if target.exists():
+        raise RuntimeError(f"Upstream overlay drift: learn module already exists at {target}")
+    shutil.copy2(overlay, target)
+
+    replace_required(
+        runtime_tools,
+        "pub mod file_read;\n",
+        "pub mod file_read;\npub mod learn;\n",
+    )
+    replace_required(
+        runtime_tools,
+        "pub use file_read::FileReadTool;\n",
+        "pub use file_read::FileReadTool;\npub use learn::LearnTool;\n",
+    )
+    replace_required(
+        runtime_tools,
+        '    register_tool!("calculator", Arc::new(CalculatorTool::new()));\n',
+        '    register_tool!("calculator", Arc::new(CalculatorTool::new()));\n'
+        "    // The skill surface: list the installed skills, read one, and\n"
+        "    // change one. `skill_manage` refuses to change anything while\n"
+        "    // skill improvement is disabled, so the operator's configuration\n"
+        "    // still decides whether a skill may be rewritten.\n"
+        "    register_tool!(\n"
+        '        "skills_list",\n'
+        "        Arc::new(crate::tools::skill_manage::SkillsListTool::new(\n"
+        "            workspace_dir.to_path_buf(),\n"
+        "        ))\n"
+        "    );\n"
+        "    register_tool!(\n"
+        '        "skill_view",\n'
+        "        Arc::new(crate::tools::skill_manage::SkillViewTool::new(\n"
+        "            workspace_dir.to_path_buf(),\n"
+        "        ))\n"
+        "    );\n"
+        "    register_tool!(\n"
+        '        "skill_manage",\n'
+        "        Arc::new(crate::tools::skill_manage::SkillManageTool::new(\n"
+        "            workspace_dir.to_path_buf(),\n"
+        "            root_config.skills.skill_improvement.clone(),\n"
+        "            root_config.skills.allow_scripts,\n"
+        "        ))\n"
+        "    );\n"
+        "    // `learn` records what the agent learned, so the next run starts\n"
+        "    // from it instead of from zero.\n"
+        "    register_tool!(\n"
+        '        "learn",\n'
+        "        Arc::new(LearnTool::new(workspace_dir.to_path_buf()))\n"
+        "    );\n",
+    )
+    replace_required(
+        attribution,
+        "use crate::tools::verifiable_intent::VerifiableIntentTool;\n",
+        "use crate::tools::learn::LearnTool;\n"
+        "use crate::tools::verifiable_intent::VerifiableIntentTool;\n",
+    )
+    replace_required(
+        attribution,
+        "tool_attribution!(VerifiableIntentTool, ToolKind::Plugin);\n",
+        "tool_attribution!(LearnTool, ToolKind::Plugin);\n"
+        "tool_attribution!(VerifiableIntentTool, ToolKind::Plugin);\n",
+    )
+
+    # ── the inventory rows ───────────────────────────────────────────────
+    inventory = source / "crates/zeroclaw-tools/src/inventory.rs"
+    replace_required(
+        inventory,
+        "    // Tier 3: optional. Utilities.\n",
+        "    // Tier 2: host-coupled. Coordination.\n"
+        "    BuiltinToolSpec {\n"
+        '        name: "wait",\n'
+        "        tier: ToolTier::Host,\n"
+        "        compilation: BuiltinToolCompilation::Always,\n"
+        "    },\n"
+        "    // Tier 2: host-coupled. Skills and lessons.\n"
+        + "".join(
+            "    BuiltinToolSpec {\n"
+            f'        name: "{name}",\n'
+            "        tier: ToolTier::Host,\n"
+            "        compilation: BuiltinToolCompilation::Always,\n"
+            "    },\n"
+            for name in ("skills_list", "skill_view", "skill_manage", "learn")
+        )
+        + "    // Tier 3: optional. Utilities.\n",
+    )
+
+    # ── the inventory docs page ──────────────────────────────────────────
+    replace_required(
+        source / "docs/book/src/developing/tool-inventory.md",
+        "| Runtime-defined | `security_ops` | Lives in the runtime crate and uses its security playbook and vulnerability modules. |\n",
+        "| Runtime-defined | `security_ops` | Lives in the runtime crate and uses its security playbook and vulnerability modules. |\n"
+        "| Coordination | `wait` | Blocks on the durable task registry until a background task reaches a terminal state, with a bounded timeout. It reads the same registry the delegate and subagent producers write to, and it adds no new lifecycle state. |\n"
+        "| Skills and lessons | `skills_list`, `skill_view`, `skill_manage`, `learn` | `skills_list` and `skill_view` read the installed skills; `skill_manage` rewrites one, and refuses to while skill improvement is disabled; `learn` records a lesson so the next run starts from it, optionally folding it into a named skill. |\n",
+    )
+
+    # ── the skill tools are in the inventory now ─────────────────────────
+    scan = source / "crates/zeroclaw-tools/tests/inventory_source_scan.rs"
+    for tool in ("skills_list", "skill_view", "skill_manage"):
+        remove_required(
+            scan,
+            "    (\n"
+            f'        "{tool}",\n'
+            '        "only the opt-in background skill review registers it",\n'
+            "    ),\n",
+        )
+
+
+def project_enact_turn_control(source):
+    """Give the turn a control channel: plan mode, checkpoints, and rewinds.
+
+    A tool sees only its own arguments — the transcript belongs to the turn
+    loop — so the capabilities that need the conversation's history cannot be
+    built as ordinary tools. The loop owns a control channel and scopes it
+    around the turn; the tools borrow it through the channel's task-local and
+    ask for a change; the loop applies the change at the top of its next
+    iteration, where it owns the transcript.
+
+    Plan mode rides the same channel. While the turn is in plan mode only the
+    read-tier tools run, and the write and execute tools are refused with a
+    message that says what to do instead. Leaving plan mode is the operator's
+    decision: the agent asks with `plan_execute`, which the approval policy
+    judges like any other write.
+    """
+    agent = source / "crates/zeroclaw-runtime/src/agent/mod.rs"
+    turn = source / "crates/zeroclaw-runtime/src/agent/turn/mod.rs"
+    specs = source / "crates/zeroclaw-runtime/src/agent/turn/tool_specs.rs"
+    prep = source / "crates/zeroclaw-runtime/src/agent/turn/call_prep.rs"
+    runtime_tools = source / "crates/zeroclaw-runtime/src/tools/mod.rs"
+    attribution = source / "crates/zeroclaw-runtime/src/tools/attribution.rs"
+    runtime_lib = source / "crates/zeroclaw-runtime/src/lib.rs"
+
+    # The trait solver runs out of room while it proves that an async tool
+    # call is `Send`: every `Tool` implementation is a candidate in that
+    # search, so the crate's own tool count decides whether the default
+    # recursion limit is enough. The limit is raised rather than the proof
+    # narrowed, because the proof is the same one the compiler has always
+    # made — it just needs more room now.
+    replace_required(
+        runtime_lib,
+        "#![allow(\n"
+        "    clippy::to_string_in_format_args,\n"
+        "    clippy::useless_format,\n"
+        "    clippy::manual_inspect\n"
+        ")]\n",
+        "#![allow(\n"
+        "    clippy::to_string_in_format_args,\n"
+        "    clippy::useless_format,\n"
+        "    clippy::manual_inspect\n"
+        ")]\n"
+        "// The trait solver needs more room than the default when it compares\n"
+        "// every `Tool` implementation while proving that an async tool call\n"
+        "// is `Send`. Each implementation is a candidate in that search.\n"
+        "#![recursion_limit = \"512\"]\n",
+    )
+
+    # ── the channel and the tools ───────────────────────────────────────
+    for relative, target_relative in (
+        ("agent/turn_control.rs", "crates/zeroclaw-runtime/src/agent/turn_control.rs"),
+        ("tools/checkpoint.rs", "crates/zeroclaw-runtime/src/tools/checkpoint.rs"),
+        ("tools/rewind.rs", "crates/zeroclaw-runtime/src/tools/rewind.rs"),
+        ("tools/plan_mode.rs", "crates/zeroclaw-runtime/src/tools/plan_mode.rs"),
+        ("tools/plan_execute.rs", "crates/zeroclaw-runtime/src/tools/plan_execute.rs"),
+    ):
+        overlay = ROOT / "overlays/enact/native" / relative
+        target = source / target_relative
+        if target.exists():
+            raise RuntimeError(
+                f"Upstream overlay drift: {target_relative} already exists at {target}"
+            )
+        shutil.copy2(overlay, target)
+
+    replace_required(
+        agent,
+        "pub mod tool_execution;\npub mod tool_receipts;\n",
+        "pub mod tool_execution;\npub mod tool_receipts;\npub mod turn_control;\n",
+    )
+
+    # ── the loop owns the channel ───────────────────────────────────────
+    # The channel is scoped around the whole turn, so the loop's own code and
+    # every tool inside it read the same mode.
+    replace_required(
+        turn,
+        "async fn run_tool_call_loop_impl<'a>(\n"
+        "    mut p: ToolLoop<'a>,\n"
+        "    initial_ingress: Option<InitialIngressSubject<'a>>,\n"
+        "    seed_reported_usage: Option<ReportedRequestUsage>,\n"
+        "    repetition_guard: Option<&'a std::sync::Mutex<repetition::RepetitionGuard>>,\n"
+        ") -> Result<String> {\n",
+        "async fn run_tool_call_loop_impl<'a>(\n"
+        "    p: ToolLoop<'a>,\n"
+        "    initial_ingress: Option<InitialIngressSubject<'a>>,\n"
+        "    seed_reported_usage: Option<ReportedRequestUsage>,\n"
+        "    repetition_guard: Option<&'a std::sync::Mutex<repetition::RepetitionGuard>>,\n"
+        ") -> Result<String> {\n"
+        "    // The turn's control channel: plan mode, checkpoints, and rewinds.\n"
+        "    // The loop owns it; the tools borrow it through the scope below and\n"
+        "    // ask for a change, and the loop applies what they asked for at the\n"
+        "    // top of its next iteration, where it owns the transcript.\n"
+        "    let control = crate::agent::turn_control::TurnControl::new(\n"
+        "        crate::agent::turn_control::AgentMode::Execute,\n"
+        "    );\n"
+        "    // The turn engine is a very large future. It is boxed so the\n"
+        "    // stack holds a pointer to it rather than its whole state, and\n"
+        "    // the scope around it does not put the turn on the stack.\n"
+        "    crate::agent::turn_control::scope(\n"
+        "        Arc::clone(&control),\n"
+        "        Box::pin(run_tool_call_loop_inner(\n"
+        "            p,\n"
+        "            initial_ingress,\n"
+        "            seed_reported_usage,\n"
+        "            repetition_guard,\n"
+        "            control,\n"
+        "        )),\n"
+        "    )\n"
+        "    .await\n"
+        "}\n"
+        "\n"
+        "async fn run_tool_call_loop_inner<'a>(\n"
+        "    mut p: ToolLoop<'a>,\n"
+        "    initial_ingress: Option<InitialIngressSubject<'a>>,\n"
+        "    seed_reported_usage: Option<ReportedRequestUsage>,\n"
+        "    repetition_guard: Option<&'a std::sync::Mutex<repetition::RepetitionGuard>>,\n"
+        "    control: crate::agent::turn_control::TurnControlHandle,\n"
+        ") -> Result<String> {\n",
+    )
+
+    # The transcript's position, as a checkpoint records it and a rewind
+    # restores it. Both buffers have to move together: the provider-visible
+    # transcript and the persistence delta grow in step, and the post-turn
+    # replay puts the canonical buffer back into the durable history.
+    replace_required(
+        turn,
+        "    /// Advance the cursor past all current canonical messages.  Call after\n"
+        "    /// external code modifies both buffers (e.g. `drive_live_sop_actions`).\n",
+        "    /// Where the transcript stands: the provider-visible length and the\n"
+        "    /// persistence-delta length. A checkpoint records this pair, so a\n"
+        "    /// rewind can restore both buffers exactly.\n"
+        "    fn anchor(&self) -> crate::agent::turn_control::TranscriptAnchor {\n"
+        "        crate::agent::turn_control::TranscriptAnchor {\n"
+        "            history_len: self.history.len(),\n"
+        "            canonical_len: self.canonical.as_ref().map_or(0, |c| c.len()),\n"
+        "        }\n"
+        "    }\n"
+        "\n"
+        "    /// Restore both buffers to a recorded anchor.\n"
+        "    fn rewind_to(&mut self, anchor: crate::agent::turn_control::TranscriptAnchor) {\n"
+        "        self.history.truncate(anchor.history_len);\n"
+        "        if let Some(ref mut canonical) = self.canonical {\n"
+        "            canonical.truncate(anchor.canonical_len);\n"
+        "        }\n"
+        "        self.synced = self.canonical.as_ref().map_or(0, |c| c.len());\n"
+        "    }\n"
+        "\n"
+        "    /// Advance the cursor past all current canonical messages.  Call after\n"
+        "    /// external code modifies both buffers (e.g. `drive_live_sop_actions`).\n",
+    )
+
+    # Where the transcript stands now, so a checkpoint taken during this round
+    # records the position the round starts from.
+    replace_required(
+        turn,
+        "        let PreparedToolCalls {\n"
+        "            mut ordered_results,\n"
+        "            mut executable_indices,\n"
+        "            mut executable_calls,\n"
+        "            mut stream_calls,\n"
+        "        } = prepare_tool_calls(\n",
+        "        publish_transcript_anchor(&control, &turn_state);\n"
+        "        let PreparedToolCalls {\n"
+        "            mut ordered_results,\n"
+        "            mut executable_indices,\n"
+        "            mut executable_calls,\n"
+        "            mut stream_calls,\n"
+        "        } = prepare_tool_calls(\n",
+    )
+
+    # What the tools asked for while the previous round ran. It is applied
+    # here, before the iteration assembles its tool set, so a turn that enters
+    # plan mode stops offering the write tools at once.
+    replace_required(
+        turn,
+        "    for iteration in 0..max_iterations {\n"
+        "        let mut has_new_user_input = iteration == 0;\n",
+        "    for iteration in 0..max_iterations {\n"
+        "        apply_turn_requests(&control, &mut turn_state);\n"
+        "        let mut has_new_user_input = iteration == 0;\n",
+    )
+
+    # The two helpers the loop uses. They live beside the turn state they
+    # act on.
+    replace_required(
+        turn,
+        "        self.synced = self.canonical.as_ref().map_or(0, |c| c.len());\n"
+        "    }\n"
+        "}\n",
+        "        self.synced = self.canonical.as_ref().map_or(0, |c| c.len());\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "/// Apply what the tools asked for during the previous round.\n"
+        "///\n"
+        "/// A mode change takes effect at once. A rewind restores the transcript\n"
+        "/// to the checkpoint it names, in both buffers, so the messages the\n"
+        "/// rewind discards are not replayed into the durable history after the\n"
+        "/// loop ends.\n"
+        "fn apply_turn_requests(\n"
+        "    control: &crate::agent::turn_control::TurnControlHandle,\n"
+        "    turn_state: &mut TurnState<'_>,\n"
+        ") {\n"
+        "    let requests = {\n"
+        "        let mut state = match control.lock() {\n"
+        "            Ok(state) => state,\n"
+        "            Err(poisoned) => poisoned.into_inner(),\n"
+        "        };\n"
+        "        state.take_requests()\n"
+        "    };\n"
+        "    for request in requests {\n"
+        "        match request {\n"
+        "            crate::agent::turn_control::TurnRequest::SetMode(mode) => {\n"
+        "                let mut state = match control.lock() {\n"
+        "                    Ok(state) => state,\n"
+        "                    Err(poisoned) => poisoned.into_inner(),\n"
+        "                };\n"
+        "                state.set_mode(mode);\n"
+        "            }\n"
+        "            crate::agent::turn_control::TurnRequest::Rewind { checkpoint_id } => {\n"
+        "                let anchor = {\n"
+        "                    let state = match control.lock() {\n"
+        "                        Ok(state) => state,\n"
+        "                        Err(poisoned) => poisoned.into_inner(),\n"
+        "                    };\n"
+        "                    state.checkpoint(&checkpoint_id).map(|entry| entry.anchor)\n"
+        "                };\n"
+        "                if let Some(anchor) = anchor {\n"
+        "                    turn_state.rewind_to(anchor);\n"
+        "                }\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "/// Publish where the transcript stands, so a checkpoint taken during\n"
+        "/// this round records the position the round starts from.\n"
+        "fn publish_transcript_anchor(\n"
+        "    control: &crate::agent::turn_control::TurnControlHandle,\n"
+        "    turn_state: &TurnState<'_>,\n"
+        ") {\n"
+        "    let mut state = match control.lock() {\n"
+        "        Ok(state) => state,\n"
+        "        Err(poisoned) => poisoned.into_inner(),\n"
+        "    };\n"
+        "    state.publish_anchor(turn_state.anchor());\n"
+        "}\n",
+    )
+
+    # ── plan mode: what the model may call ──────────────────────────────
+    # The write and execute tools are not offered while the turn is in plan
+    # mode. They stay in the known set, so a call to one is refused with the
+    # plan-mode message instead of an "unknown tool" error.
+    replace_required(
+        specs,
+        "    // >>> herdr-prompt-cache: deterministic tool ordering\n",
+        "    // Plan mode: the turn may read but not act, so the write and execute\n"
+        "    // tools are not offered to the model. A canonical family offers both\n"
+        "    // read and write operations, so it stays offered and the call-time\n"
+        "    // check judges the operation the action names.\n"
+        "    if crate::agent::turn_control::current_mode()\n"
+        "        == crate::agent::turn_control::AgentMode::Plan\n"
+        "    {\n"
+        "        for spec in &tool_specs {\n"
+        "            let is_family = crate::tools::families::family_by_name(&spec.name).is_some();\n"
+        "            if !is_family\n"
+        "                && !crate::agent::turn_control::allowed_in_mode(\n"
+        "                    crate::agent::turn_control::AgentMode::Plan,\n"
+        "                    &spec.name,\n"
+        "                    None,\n"
+        "                )\n"
+        "            {\n"
+        "                hidden_builtin_names.insert(spec.name.clone());\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "    // >>> herdr-prompt-cache: deterministic tool ordering\n",
+    )
+
+    # Plan mode refuses a call that would change the machine, with a message
+    # that says what to do instead. The refusal happens before the approval
+    # gate: a call that plan mode withholds is not one the operator should be
+    # asked about.
+    replace_required(
+        prep,
+        "        crate::agent::set_runtime_approved_arg(&tool_name, &mut tool_args, false);\n",
+        "        crate::agent::set_runtime_approved_arg(&tool_name, &mut tool_args, false);\n"
+        "\n"
+        "        // Plan mode: the turn may read but not act. A call that would\n"
+        "        // change the machine is refused here, with a message that says\n"
+        "        // what to do instead, so the model does not have to guess.\n"
+        "        let mode = crate::agent::turn_control::current_mode();\n"
+        "        if mode == crate::agent::turn_control::AgentMode::Plan\n"
+        "            && !crate::agent::turn_control::allowed_in_mode(\n"
+        "                mode,\n"
+        "                &tool_name,\n"
+        "                tool_args.get(\"action\").and_then(|value| value.as_str()),\n"
+        "            )\n"
+        "        {\n"
+        "            let refusal = crate::agent::turn_control::plan_mode_refusal(&tool_name);\n"
+        "            let outcome = crate::agent::tool_execution::ToolExecutionOutcome {\n"
+        "                output: format!(\"Error: {refusal}\"),\n"
+        "                attachments: Vec::new(),\n"
+        "                output_data: None,\n"
+        "                success: false,\n"
+        "                error_reason: Some(refusal),\n"
+        "                duration: std::time::Duration::ZERO,\n"
+        "                receipt: None,\n"
+        "            };\n"
+        "            // The before phase ran but this call will never execute:\n"
+        "            // its only terminal lifecycle operation is abandonment.\n"
+        "            abandon_prepared_context(ctx, &hook_context, &tool_name).await;\n"
+        "            if let Some(tx) = ctx.event_tx {\n"
+        "                emit_tool_call_pair(tx, call, &outcome).await;\n"
+        "            }\n"
+        "            ordered_results[idx] =\n"
+        "                Some((tool_name.clone(), call.tool_call_id.clone(), outcome));\n"
+        "            continue;\n"
+        "        }\n",
+    )
+
+    # ── the tools ───────────────────────────────────────────────────────
+    replace_required(
+        runtime_tools,
+        "pub mod cron_update;\n",
+        "pub mod checkpoint;\npub mod cron_update;\n",
+    )
+    replace_required(
+        runtime_tools,
+        "pub use cron_update::CronUpdateTool;\n",
+        "pub use checkpoint::CheckpointTool;\npub use cron_update::CronUpdateTool;\n",
+    )
+    replace_required(
+        runtime_tools,
+        "pub mod model_switch;\n",
+        "pub mod model_switch;\npub mod plan_execute;\npub mod plan_mode;\n",
+    )
+    replace_required(
+        runtime_tools,
+        "pub use model_switch::ModelSwitchTool;\n",
+        "pub use model_switch::ModelSwitchTool;\n"
+        "pub use plan_execute::PlanExecuteTool;\n"
+        "pub use plan_mode::PlanModeTool;\n",
+    )
+    replace_required(
+        runtime_tools,
+        "pub mod read_skill;\n",
+        "pub mod read_skill;\npub mod rewind;\n",
+    )
+    replace_required(
+        runtime_tools,
+        "pub use read_skill::ReadSkillTool;\n",
+        "pub use read_skill::ReadSkillTool;\npub use rewind::RewindTool;\n",
+    )
+    replace_required(
+        runtime_tools,
+        '    register_tool!("calculator", Arc::new(CalculatorTool::new()));\n',
+        '    register_tool!("calculator", Arc::new(CalculatorTool::new()));\n'
+        "    // The turn's control channel, as tools. `checkpoint` and `rewind`\n"
+        "    // mark and return to a point in the conversation; `plan_mode` puts\n"
+        "    // the turn in plan mode, and `plan_execute` asks the operator to\n"
+        "    // let it act again.\n"
+        '    register_tool!(\n'
+        '        "checkpoint",\n'
+        "        Arc::new(crate::tools::checkpoint::CheckpointTool::new())\n"
+        "    );\n"
+        '    register_tool!(\n'
+        '        "rewind",\n'
+        "        Arc::new(crate::tools::rewind::RewindTool::new())\n"
+        "    );\n"
+        '    register_tool!(\n'
+        '        "plan_mode",\n'
+        "        Arc::new(crate::tools::plan_mode::PlanModeTool::new())\n"
+        "    );\n"
+        '    register_tool!(\n'
+        '        "plan_execute",\n'
+        "        Arc::new(crate::tools::plan_execute::PlanExecuteTool::new())\n"
+        "    );\n",
+    )
+
+    replace_required(
+        attribution,
+        "use crate::tools::verifiable_intent::VerifiableIntentTool;\n",
+        "use crate::tools::checkpoint::CheckpointTool;\n"
+        "use crate::tools::plan_execute::PlanExecuteTool;\n"
+        "use crate::tools::plan_mode::PlanModeTool;\n"
+        "use crate::tools::rewind::RewindTool;\n"
+        "use crate::tools::verifiable_intent::VerifiableIntentTool;\n",
+    )
+    replace_required(
+        attribution,
+        "tool_attribution!(VerifiableIntentTool, ToolKind::Plugin);\n",
+        "tool_attribution!(CheckpointTool, ToolKind::Plugin);\n"
+        "tool_attribution!(PlanExecuteTool, ToolKind::Plugin);\n"
+        "tool_attribution!(PlanModeTool, ToolKind::Plugin);\n"
+        "tool_attribution!(RewindTool, ToolKind::Plugin);\n"
+        "tool_attribution!(VerifiableIntentTool, ToolKind::Plugin);\n",
+    )
+
+    # ── the inventory rows ───────────────────────────────────────────────
+    inventory = source / "crates/zeroclaw-tools/src/inventory.rs"
+    replace_required(
+        inventory,
+        "    // Tier 3: optional. Utilities.\n",
+        "    // Tier 2: host-coupled. The turn's control channel.\n"
+        + "".join(
+            "    BuiltinToolSpec {\n"
+            f'        name: "{name}",\n'
+            "        tier: ToolTier::Host,\n"
+            "        compilation: BuiltinToolCompilation::Always,\n"
+            "    },\n"
+            for name in ("checkpoint", "rewind", "plan_mode", "plan_execute")
+        )
+        + "    // Tier 3: optional. Utilities.\n",
+    )
+
+    # ── the inventory docs page ──────────────────────────────────────────
+    replace_required(
+        source / "docs/book/src/developing/tool-inventory.md",
+        "| Runtime-defined | `security_ops` | Lives in the runtime crate and uses its security playbook and vulnerability modules. |\n",
+        "| Runtime-defined | `security_ops` | Lives in the runtime crate and uses its security playbook and vulnerability modules. |\n"
+        "| Turn control | `checkpoint`, `rewind`, `plan_mode`, `plan_execute` | `checkpoint` marks a point in the conversation and `rewind` returns to it, through the turn loop's control channel; `plan_mode` puts the turn in plan mode, where only the read-tier tools run, and `plan_execute` asks the operator to let it act again. |\n",
+    )
+
+    # ── the builtin-selection fixture ────────────────────────────────────
+    fixture = source / "crates/zeroclaw-runtime/tests/builtin_selection_boundary.rs"
+    text = fixture.read_text()
+    anchor = '        "calculator",\n'
+    if text.count(anchor) != 1:
+        raise RuntimeError(f"Upstream overlay drift: expected one {anchor!r} in {fixture}")
+    additions = "".join(
+        f'        "{name}",\n'
+        for name in ("checkpoint", "rewind", "plan_mode", "plan_execute")
+    )
+    fixture.write_text(text.replace(anchor, anchor + additions))
+
+def project_enact_plugin_hooks(source):
+    """Let a WebAssembly plugin serve as a hook.
+
+    A declarative hook answers by running a shell command; a plugin hook
+    answers in process. Both are consulted by the same hook runner, at the
+    same points, so a plugin hook composes with the command hooks rather than
+    replacing them.
+
+    The plugin declares the `hook` capability and exports the `hook-plugin`
+    world. The host binds it to a `HookHandler`, so the turn's runner can ask
+    it before a tool call, after a tool call, and before the prompt is built.
+
+    A hook that fails does not get to decide: a plugin that traps, misses its
+    deadline, or answers with something the host cannot read leaves the turn
+    as if the hook had not been asked.
+    """
+    plugins = source / "crates/zeroclaw-plugins/src/lib.rs"
+    component = source / "crates/zeroclaw-plugins/src/component.rs"
+    logging = source / "crates/zeroclaw-plugins/src/component_logging.rs"
+    host = source / "crates/zeroclaw-plugins/src/host.rs"
+    validate = source / "crates/zeroclaw-plugins/src/validate.rs"
+    runtime = source / "crates/zeroclaw-runtime/src/plugin_runtime.rs"
+
+    # ── the adapter ─────────────────────────────────────────────────────
+    overlay = ROOT / "overlays/enact/native/plugins/wasm_hook.rs"
+    target = source / "crates/zeroclaw-plugins/src/wasm_hook.rs"
+    if target.exists():
+        raise RuntimeError(
+            f"Upstream overlay drift: the hook adapter already exists at {target}"
+        )
+    shutil.copy2(overlay, target)
+
+    # ── the capability ──────────────────────────────────────────────────
+    replace_required(
+        plugins,
+        "    /// Provides one or more agentskills.io-format skills under `skills/`\n"
+        "    Skill,\n"
+        "}\n",
+        "    /// Provides one or more agentskills.io-format skills under `skills/`\n"
+        "    Skill,\n"
+        "    /// Provides a hook: a callback the turn consults while it runs\n"
+        "    Hook,\n"
+        "}\n",
+    )
+    replace_required(
+        plugins,
+        "#[cfg(feature = \"plugins-wasmtime\")]\n"
+        "pub mod wasm_channel;\n",
+        "#[cfg(feature = \"plugins-wasmtime\")]\n"
+        "pub mod wasm_channel;\n"
+        "#[cfg(feature = \"plugins-wasmtime\")]\n"
+        "pub mod wasm_hook;\n",
+    )
+    replace_required(
+        runtime,
+        '        PluginCapability::Channel => "channel",\n',
+        '        PluginCapability::Channel => "channel",\n'
+        '        PluginCapability::Hook => "hook",\n',
+    )
+
+    # ── the world ───────────────────────────────────────────────────────
+    replace_required(
+        component,
+        "    pub mod memory {\n"
+        "        wasmtime::component::bindgen!({\n"
+        '            world: "memory-plugin",\n'
+        '            path: "wit/v0",\n'
+        "            imports: { default: async },\n"
+        "            exports: { default: async },\n"
+        "        });\n"
+        "    }\n"
+        "}\n",
+        "    pub mod memory {\n"
+        "        wasmtime::component::bindgen!({\n"
+        '            world: "memory-plugin",\n'
+        '            path: "wit/v0",\n'
+        "            imports: { default: async },\n"
+        "            exports: { default: async },\n"
+        "        });\n"
+        "    }\n"
+        "    pub mod hook {\n"
+        "        wasmtime::component::bindgen!({\n"
+        '            world: "hook-plugin",\n'
+        '            path: "wit/v0",\n'
+        "            imports: { default: async },\n"
+        "            exports: { default: async },\n"
+        "        });\n"
+        "    }\n"
+        "}\n",
+    )
+    # The hook world imports logging, so the logging host has to be linked
+    # for it as well.
+    replace_required(
+        logging,
+        "impl_host!(memory);\n",
+        "impl_host!(memory);\nimpl_host!(hook);\n",
+    )
+
+    # ── the host's view of a hook plugin ────────────────────────────────
+    replace_required(
+        host,
+        "    /// Get skill-capable plugins.\n"
+        "    pub fn skill_plugins(&self) -> Vec<&PluginManifest> {\n",
+        "    /// Get hook-capable plugins.\n"
+        "    pub fn hook_plugins(&self) -> Vec<&PluginManifest> {\n"
+        "        self.loaded\n"
+        "            .values()\n"
+        "            .filter(|p| p.manifest.capabilities.contains(&PluginCapability::Hook))\n"
+        "            .map(|p| &p.manifest)\n"
+        "            .collect()\n"
+        "    }\n"
+        "\n"
+        "    /// The admitted components of the hook-capable plugins.\n"
+        "    pub fn hook_plugin_details(&self) -> Vec<(&PluginManifest, &AdmittedComponent)> {\n"
+        "        self.executable_plugin_details(PluginCapability::Hook)\n"
+        "    }\n"
+        "\n"
+        "    /// Get skill-capable plugins.\n"
+        "    pub fn skill_plugins(&self) -> Vec<&PluginManifest> {\n",
+    )
+
+    # ── the install-time load check ─────────────────────────────────────
+    replace_required(
+        validate,
+        "            // Memory and other capabilities are covered by the compile check\n"
+        "            // above; a dedicated instantiate world for them is a follow-up.\n"
+        "            _ => {}\n",
+        "            PluginCapability::Hook => {\n"
+        "                let scope = PluginInstanceScope::for_package_binding(\n"
+        "                    manifest,\n"
+        "                    PluginCapability::Hook,\n"
+        "                    manifest.permissions.iter().copied(),\n"
+        "                )?;\n"
+        "                crate::wasm_hook::verify_hook_loads(component, &scope, &services, limits)\n"
+        "                    .await?;\n"
+        "            }\n"
+        "            // Memory and other capabilities are covered by the compile check\n"
+        "            // above; a dedicated instantiate world for them is a follow-up.\n"
+        "            _ => {}\n",
+    )
+
+    # ── the documentation ───────────────────────────────────────────────
+    replace_required(
+        source / "docs/book/src/plugins/index.md",
+        "- **Capabilities**: what the plugin *is*. One or more of `tool`, `channel`,\n"
+        "  `memory`, `observer`, `skill` (the `PluginCapability` enum in\n",
+        "- **Capabilities**: what the plugin *is*. One or more of `tool`, `channel`,\n"
+        "  `memory`, `observer`, `skill`, `hook` (the `PluginCapability` enum in\n",
+    )
+    replace_required(
+        source / "docs/book/src/plugins/index.md",
+        "| `observer` | none | `PluginCapability::Observer` is reserved; no WIT world or adapter exists yet |\n",
+        "| `observer` | none | `PluginCapability::Observer` is reserved; no WIT world or adapter exists yet |\n"
+        "| `hook` | `WasmHook`, implements the `HookHandler` trait | Registered with the same hook runner the declarative command hooks use, so a plugin hook composes with them rather than replacing them |\n",
+    )
+
+    # ── the interface definition ────────────────────────────────────────
+    # The package root and the crate-local copy are both needed: the host
+    # binds the crate-local one, and a fixture guest binds the package one.
+    overlay_wit = ROOT / "overlays/enact/native/plugins/hook.wit"
+    for relative in ("wit/v0/hook.wit", "crates/zeroclaw-plugins/wit/v0/hook.wit"):
+        target_wit = source / relative
+        if target_wit.exists():
+            raise RuntimeError(
+                f"Upstream overlay drift: the hook interface already exists at {target_wit}"
+            )
+        target_wit.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(overlay_wit, target_wit)
+
+def project_enact_builtin_selection_fixture(source):
+    """Keep the builtin-selection fixture in step with the shipped registry.
+
+    The fixture is a snapshot of the tools a full chat configuration
+    assembles. Every tool the overlay adds — and every canonical family the
+    consolidation adds — belongs in it.
+    """
+    fixture = source / "crates/zeroclaw-runtime/tests/builtin_selection_boundary.rs"
+    text = fixture.read_text()
+    anchor = '        "calculator",\n'
+    if text.count(anchor) != 1:
+        raise RuntimeError(f"Upstream overlay drift: expected one {anchor!r} in {fixture}")
+    additions = "".join(f'        "{name}",\n' for name in ("ast_edit", "ast_grep", "callgraph", "compose", "expand", "graph", "radar", "cron", "learn", "memory", "model", "sessions", "skill_manage", "skill_view", "skills_list", "wait"))
+    fixture.write_text(text.replace(anchor, anchor + additions))
+
+
+def project_enact_branding_consistency(source):
+    """Keep the branded tree's own expectations in step with its branding.
+
+    The branding overlay renames the product, the command, the built-in skill
+    and the environment variables. Every upstream expectation that names one
+    of them has to follow, or the tree ships a test suite that fails against
+    the product it actually builds.
+
+    Two of the fixes here are more than renames:
+
+    * `Config::agent_workspace_dir` anchors the agent's workspace to the
+      install root rather than to `$HOME`. A config in its own directory has
+      to own its agents' workspaces, and a test that builds a config in a
+      temporary directory has to get its workspace there too — not in the
+      operator's real home, where the next test run finds it.
+    * The locale catalogues name the environment variable the plugin
+      registry reads. The Rust side was renamed and the message was not, so
+      the operator was told to set a variable the binary ignores.
+    """
+    brand = manifest()
+
+    # ── the workspace shape the branded tree uses ───────────────────────
+    browse = source / "crates/zeroclaw-runtime/src/browse.rs"
+    browse_text = browse.read_text()
+    old_shape = "agents/alpha/workspace"
+    new_shape = "workspace/agents/alpha"
+    if old_shape not in browse_text:
+        raise RuntimeError(f"Upstream overlay drift: expected {old_shape!r} in {browse}")
+    browse.write_text(browse_text.replace(old_shape, new_shape))
+
+    # ── the built-in skill's name ───────────────────────────────────────
+    # The embedded asset keeps its upstream path; only the skill's name
+    # changed, and every expectation that names it has to follow.
+    skills = source / "crates/zeroclaw-runtime/src/skills/mod.rs"
+    skills_text = skills.read_text()
+    include = 'include_str!("assets/zeroclaw-docs/SKILL.md")'
+    if skills_text.count(include) != 1:
+        raise RuntimeError(f"Upstream overlay drift: expected one {include!r} in {skills}")
+    head, _, tail = skills_text.partition(include)
+    tail = tail.replace("zeroclaw-docs", "enact-agent-docs")
+    skills.write_text(head + include + tail)
+
+    for relative in (
+        "crates/zeroclaw-runtime/src/skills/service.rs",
+        "crates/zeroclaw-runtime/src/tools/read_skill.rs",
+        "crates/zeroclaw-runtime/src/tools/mod.rs",
+    ):
+        path = source / relative
+        text = path.read_text()
+        if "zeroclaw-docs" not in text:
+            raise RuntimeError(f"Upstream overlay drift: expected the old skill name in {path}")
+        text = text.replace("zeroclaw-docs", "enact-agent-docs")
+        # The resolver lists the available skills in sorted order, so the
+        # renamed skill moves to the front of the list.
+        text = text.replace(
+            "Available skills: weather, enact-agent-docs",
+            "Available skills: enact-agent-docs, weather",
+        )
+        path.write_text(text)
+
+    # ── the product literal in the expectations ──────────────────────────
+    for relative in (
+        "crates/zeroclaw-runtime/src/skills/mod.rs",
+        "crates/zeroclaw-runtime/src/tools/read_skill.rs",
+    ):
+        path = source / relative
+        text = path.read_text()
+        text = text.replace(
+            "# ZeroClaw self-knowledge and operation",
+            "# Enact Agent self-knowledge and operation",
+        )
+        path.write_text(text)
+
+    skills = source / "crates/zeroclaw-runtime/src/skills/mod.rs"
+    text = skills.read_text()
+    text = text.replace(
+        "current ZeroClaw installation",
+        "active Enact Agent installation",
+    )
+    text = text.replace("not audited by ZeroClaw", "not audited by Enact Agent")
+    text = text.replace("zeroclaw skills audit", "enact-agent skills audit")
+    text = text.replace("# ZeroClaw Skills", "# Enact Agent Skills")
+    skills.write_text(text)
+
+    # ── the refusal messages the locale drives ──────────────────────────
+    # Only the test module asserts the product name; the production doc
+    # comments describe upstream behaviour and stay as they are.
+    authority = source / "crates/zeroclaw-runtime/src/live_config_authority.rs"
+    text = authority.read_text()
+    marker = "#[cfg(test)]\nmod tests"
+    if text.count(marker) != 1:
+        raise RuntimeError(f"Upstream overlay drift: expected one test module in {authority}")
+    head, _, tail = text.partition(marker)
+    authority.write_text(head + marker + tail.replace("ZeroClaw", brand["name"]))
+
+    # ── the environment variable the messages name ──────────────────────
+    # The Rust side reads `ENACT_AGENT_<path>`; a message that still says
+    # `ZEROCLAW_<path>` tells the operator to set a variable the binary
+    # ignores. Every catalogue follows the code.
+    for catalogue in source.rglob("*.ftl"):
+        text = catalogue.read_text()
+        if "ZEROCLAW_" in text:
+            catalogue.write_text(text.replace("ZEROCLAW_", "ENACT_AGENT_"))
+
+    # ── the transcript fixture the branded renderer changed ─────────────
+    # The overlay adds a `success` field to a rendered tool result, so the
+    # shared fixture carries it too.
+    for relative in (
+        "crates/zeroclaw-runtime/tests/fixtures/single-tool-rounds.json",
+        "apps/zerocode/tests/fixtures/single-tool-rounds.json",
+    ):
+        path = source / relative
+        if not path.is_file():
+            raise RuntimeError(f"Upstream overlay drift: missing the transcript fixture {path}")
+        text = path.read_text()
+        for result in ("result-1", "result-2"):
+            old = f'"raw_output": "{result}"'
+            new = f'"raw_output": "{result}", "success": true'
+            if old not in text:
+                raise RuntimeError(
+                    f"Upstream overlay drift: expected {old!r} in {path}"
+                )
+            text = text.replace(old, new)
+        path.write_text(text)
+
+    # ── the desktop fixtures read the environment the runtime sets ──────
+    for relative in (
+        "crates/zeroclaw-runtime/tests/fixtures/desktop-generation-one.sh",
+        "crates/zeroclaw-runtime/tests/fixtures/desktop-generation-two.sh",
+    ):
+        path = source / relative
+        if not path.is_file():
+            raise RuntimeError(f"Upstream overlay drift: missing the desktop fixture {path}")
+        text = path.read_text()
+        text = text.replace("ZEROCLAW_DESKTOP_", "ENACT_AGENT_DESKTOP_")
+        path.write_text(text)
+
+
+def project_enact_config_dir_branding(source):
+    """Keep the config crate's own expectations in step with the branded home.
+
+    The branded product keeps its configuration in `$ENACT_HOME/agent`, or
+    `~/.enact/agent` when no home is named, and the data directory beside it.
+    The upstream expectations still name `~/.zeroclaw`, so the branded tree
+    fails its own suite: the fixtures build a config in one place and the
+    loader looks in another.
+
+    The container layout is deliberately left alone. A container image keeps
+    its install beside the data directory, and that install is found by the
+    legacy `.zeroclaw` name, so the branded tree has to keep recognising it.
+
+    One failure here is not a branding problem at all: on a case-insensitive
+    filesystem `nul` and `NUL` are one filename, so the policy fixture cannot
+    create both aliases. The test skips the folded name instead of failing.
+    """
+    config = source / "crates/zeroclaw-config/src/schema.rs"
+    native = source / "crates/zeroclaw-config/src/platform/native.rs"
+    policy = source / "crates/zeroclaw-config/src/policy.rs"
+    recovery = source / "crates/zeroclaw-config/tests/legacy_plugin_recovery.rs"
+
+    # ── the storage path names the branded home ─────────────────────────
+    replace_required(
+        native,
+        '    fn native_storage_path_contains_zeroclaw() {\n'
+        "        let path = NativeRuntime::new().storage_path();\n"
+        '        assert!(path.to_string_lossy().contains("zeroclaw"));\n'
+        "    }\n",
+        "    fn native_storage_path_contains_enact() {\n"
+        "        let path = NativeRuntime::new().storage_path();\n"
+        '        assert!(path.to_string_lossy().contains("enact"));\n'
+        "    }\n",
+    )
+
+    # ── the fallbacks agree with the branded default ────────────────────
+    replace_required(
+        config,
+        '            home.join(".zeroclaw")\n        });\n',
+        '            home.join(".enact").join("agent")\n        });\n',
+    )
+    replace_required(
+        config,
+        '        Err(_) => format!("~/.zeroclaw/{relative}"),\n',
+        '        Err(_) => format!("~/.enact/agent/{relative}"),\n',
+    )
+
+    # ── the fixtures build the config where the loader looks for it ─────
+    replace_required(
+        config,
+        '                "default ~/.zeroclaw",\n'
+        "                default_home.clone(),\n"
+        "                None,\n"
+        "                None,\n"
+        '                Some(default_home.join(".zeroclaw/config.toml")),\n'
+        '                default_home.join(".zeroclaw"),\n'
+        '                default_home.join(".zeroclaw/data"),\n',
+        '                "default ~/.enact/agent",\n'
+        "                default_home.clone(),\n"
+        "                None,\n"
+        "                None,\n"
+        '                Some(default_home.join(".enact/agent/config.toml")),\n'
+        '                default_home.join(".enact/agent"),\n'
+        '                default_home.join(".enact/agent/data"),\n',
+    )
+    replace_required(
+        config,
+        '        for layout in ["default ~/.zeroclaw", "container", "explicit --config-dir"] {\n',
+        '        for layout in ["default ~/.enact/agent", "container", "explicit --config-dir"] {\n',
+    )
+    replace_required(
+        config,
+        '                _ => (home.join(".zeroclaw"), None, None),\n',
+        '                _ => (home.join(".enact/agent"), None, None),\n',
+    )
+    replace_required(
+        config,
+        '            classify_runtime_config_kind(&fake_home.join(".zeroclaw").join("config.toml")).await,\n',
+        '            classify_runtime_config_kind(\n'
+        '                &fake_home.join(".enact/agent").join("config.toml"),\n'
+        "            )\n"
+        "            .await,\n",
+    )
+    replace_required(
+        config,
+        '        let config_dir = temp_home.join(".zeroclaw");\n',
+        '        let config_dir = temp_home.join(".enact/agent");\n',
+    )
+
+    # The container layout keeps the install beside the data directory, which
+    # is where the loader looks for it; only the default layout moves.
+    replace_required(
+        recovery,
+        "        } else {\n"
+        '            home.join(".zeroclaw")\n'
+        "        };\n",
+        "        } else if layout == \"container\" {\n"
+        '            home.join(".zeroclaw")\n'
+        "        } else {\n"
+        '            home.join(".enact/agent")\n'
+        "        };\n",
+    )
+
+    # ── a case-insensitive filesystem folds `nul` onto `NUL` ─────────────
+    replace_required(
+        policy,
+        "            let alias = workspace.join(name);\n"
+        "            symlink(target, &alias).unwrap();\n",
+        "            let alias = workspace.join(name);\n"
+        "            // A case-insensitive filesystem folds `nul` onto `NUL`, so\n"
+        "            // the second spelling is the first one and already holds\n"
+        "            // the assertions below.\n"
+        "            if let Err(error) = symlink(target, &alias) {\n"
+        "                assert_eq!(\n"
+        "                    error.kind(),\n"
+        "                    std::io::ErrorKind::AlreadyExists,\n"
+        "                    \"{name:?} must be creatable: {error}\"\n"
+        "                );\n"
+        "                continue;\n"
+        "            }\n",
+    )
+
+
 def prepare(cargo="cargo", committed=False, revision="HEAD"):
     brand = manifest()
     if SOURCE.exists():
@@ -624,6 +3157,20 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
         ).decode().split("\0")
         for name in filter(None, files):
             source = ROOT / name
+            # A tracked entry can be a symlink to a directory (`crates/
+            # zeroclaw-plugins/wit` points at the workspace root `wit/`). Copy
+            # the tree it points at: `is_file()` is false for a directory, so a
+            # plain file copy would silently drop the directory and the crate
+            # would fail to compile against a missing WIT world.
+            if source.is_symlink():
+                target = source.resolve()
+                if target.is_dir():
+                    dest = SOURCE / name
+                    shutil.copytree(target, dest, dirs_exist_ok=True, symlinks=True)
+                    continue
+                if not target.is_file():
+                    continue
+                source = target
             if not source.is_file():
                 continue
             dest = SOURCE / name
@@ -634,7 +3181,19 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
         shutil.copytree(ROOT / "web/dist", SOURCE / "web/dist", dirs_exist_ok=True)
 
     project_enact_builtin_docs_skill(SOURCE)
+    project_enact_mcp_server(SOURCE)
+    project_enact_declarative_hooks(SOURCE)
+    project_enact_trust_split(SOURCE)
+    project_enact_hooks_docs(SOURCE)
+    project_enact_context_tools(SOURCE)
+    project_enact_tool_families(SOURCE)
+    project_enact_coordination(SOURCE)
+    project_enact_turn_control(SOURCE)
+    project_enact_plugin_hooks(SOURCE)
+    project_enact_branding_consistency(SOURCE)
+    project_enact_builtin_selection_fixture(SOURCE)
     project_enact_agent_capabilities(SOURCE)
+    project_enact_config_dir_branding(SOURCE)
 
     # Retain Fluent keys, placeholders, URLs, config paths and crate identities.
     # Only the existing product literal and bare command examples are projected.
