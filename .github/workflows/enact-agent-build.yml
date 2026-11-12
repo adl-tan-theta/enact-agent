@@ -7,9 +7,9 @@ jobs:
   native:
     runs-on: ${{ matrix.os }}
     # The native release build is a full workspace compile plus a component
-    # probe. It takes ~20 minutes on a Linux runner but over an hour on the
-    # macOS runners, which are frequently oversubscribed; 120 minutes killed
-    # working builds before they could upload their artifact.
+    # probe. It takes ~20 minutes on a Linux runner but 45-80 minutes on the
+    # macOS runners, which are often oversubscribed, so 120 minutes left very
+    # little headroom for a slower runner before a working build was killed.
     timeout-minutes: 300
     strategy:
       fail-fast: false
