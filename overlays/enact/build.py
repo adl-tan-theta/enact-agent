@@ -248,6 +248,39 @@ def check_enact_tool_inventory(source, csv_path=None, families_path=None):
         )
 
 
+def install_enact_hook_wit(source):
+    """Install the hook interface into the prepared tree.
+
+    The package root and the crate-local copy are both needed: the host binds
+    the crate-local one, and a fixture guest binds the package one.
+
+    In a committed tree `crates/zeroclaw-plugins/wit` is a symlink to the
+    package root, so the two names are one file and writing it twice is not
+    drift. A working-tree preparation dereferences the symlink into a real
+    directory, so the two names are two files and both are written. An
+    interface that already exists with different content is drift.
+    """
+    overlay_wit = ROOT / "overlays/enact/native/plugins/hook.wit"
+    payload = overlay_wit.read_bytes()
+    installed = set()
+    for relative in ("wit/v0/hook.wit", "crates/zeroclaw-plugins/wit/v0/hook.wit"):
+        target_wit = source / relative
+        key = os.path.realpath(target_wit)
+        if key in installed:
+            # The crate-local name resolves to the package root: one file.
+            continue
+        installed.add(key)
+        if target_wit.exists():
+            if target_wit.read_bytes() != payload:
+                raise RuntimeError(
+                    f"Upstream overlay drift: the hook interface at {target_wit} "
+                    "differs from the overlay's"
+                )
+            continue
+        target_wit.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(overlay_wit, target_wit)
+
+
 def manifest():
     brand = json.loads((ROOT / "overlays/enact/brand.json").read_text())
     if not re.fullmatch(r"[a-z][a-z0-9-]*", brand["command"]):
@@ -2881,17 +2914,7 @@ def project_enact_plugin_hooks(source):
     )
 
     # ── the interface definition ────────────────────────────────────────
-    # The package root and the crate-local copy are both needed: the host
-    # binds the crate-local one, and a fixture guest binds the package one.
-    overlay_wit = ROOT / "overlays/enact/native/plugins/hook.wit"
-    for relative in ("wit/v0/hook.wit", "crates/zeroclaw-plugins/wit/v0/hook.wit"):
-        target_wit = source / relative
-        if target_wit.exists():
-            raise RuntimeError(
-                f"Upstream overlay drift: the hook interface already exists at {target_wit}"
-            )
-        target_wit.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(overlay_wit, target_wit)
+    install_enact_hook_wit(source)
 
 def project_enact_builtin_selection_fixture(source):
     """Keep the builtin-selection fixture in step with the shipped registry.

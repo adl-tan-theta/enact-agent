@@ -297,6 +297,57 @@ class CanonicalToolInventoryTests(unittest.TestCase):
         self.assertIn("check_enact_tool_inventory(SOURCE)", inspect.getsource(build.prepare))
 
 
+class HookInterfaceInstallTests(unittest.TestCase):
+    """The hook interface installs once, whatever the crate path is.
+
+    A committed tree keeps `crates/zeroclaw-plugins/wit` as a symlink to the
+    package root, so the two names are one file. A working-tree preparation
+    dereferences it into a real directory. Both have to work.
+    """
+
+    overlay_wit = "overlays/enact/native/plugins/hook.wit"
+
+    def test_symlinked_crate_path_installs_one_interface(self):
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            (source / "wit/v0").mkdir(parents=True)
+            (source / "crates/zeroclaw-plugins").mkdir(parents=True)
+            (source / "crates/zeroclaw-plugins/wit").symlink_to(
+                Path("../../wit"), target_is_directory=True
+            )
+            build.install_enact_hook_wit(source)
+            package = source / "wit/v0/hook.wit"
+            self.assertTrue(package.is_file())
+            self.assertEqual(package.read_bytes(), (build.ROOT / self.overlay_wit).read_bytes())
+            crate = source / "crates/zeroclaw-plugins/wit/v0/hook.wit"
+            self.assertEqual(crate.resolve(), package.resolve())
+
+    def test_distinct_crate_path_installs_both_copies(self):
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            (source / "wit/v0").mkdir(parents=True)
+            (source / "crates/zeroclaw-plugins/wit/v0").mkdir(parents=True)
+            build.install_enact_hook_wit(source)
+            self.assertTrue((source / "wit/v0/hook.wit").is_file())
+            self.assertTrue((source / "crates/zeroclaw-plugins/wit/v0/hook.wit").is_file())
+
+    def test_a_conflicting_upstream_interface_fails_closed(self):
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            (source / "wit/v0").mkdir(parents=True)
+            (source / "wit/v0/hook.wit").write_text("package zeroclaw:plugin@0.1.0;\n")
+            with self.assertRaisesRegex(RuntimeError, "differs from the overlay"):
+                build.install_enact_hook_wit(source)
+
+    def test_installing_twice_is_not_drift(self):
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            (source / "wit/v0").mkdir(parents=True)
+            (source / "crates/zeroclaw-plugins/wit/v0").mkdir(parents=True)
+            build.install_enact_hook_wit(source)
+            build.install_enact_hook_wit(source)
+
+
 class ReleaseTests(unittest.TestCase):
     def test_fixed_encoded_remap_flag_preserves_spaces_without_inherited_flags(self):
         home = "/private/fixture builder/home with spaces"
