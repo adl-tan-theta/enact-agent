@@ -470,6 +470,87 @@ class ConsolidatedFamilyTests(unittest.TestCase):
             listed,
         )
 
+    def tool_properties(self, source_text, tool_name):
+        """The parameter properties a tool's schema declares."""
+        match = re.search(
+            rf'fn name\(&self\) -> &str \{{\s*"{re.escape(tool_name)}"',
+            source_text,
+            re.S,
+        )
+        if not match:
+            return None
+        tail = source_text[match.end():]
+        schema = tail.find("fn parameters_schema")
+        if schema == -1:
+            return None
+        body = tail[schema:]
+        start = body.find('"properties"')
+        if start == -1:
+            return set()
+        brace = body.find("{", start)
+        if brace == -1:
+            return set()
+        depth = 0
+        end = brace
+        for index in range(brace, len(body)):
+            if body[index] == "{":
+                depth += 1
+            elif body[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = index
+                    break
+        return set(re.findall(r'"([a-z_]+)":\s*\{', body[brace:end]))
+
+    def test_the_matrix_policy_names_the_arguments_the_tools_take(self):
+        """The policy's field list has to match the registered tools.
+
+        Upstream's entry is dormant there, because those tools are never in
+        its default registry. The fork registers them, so the entry became
+        live — and upstream's `skill_view` takes a `slug`, not a `name`.
+        """
+        skills = (build.ROOT / "crates/zeroclaw-runtime/src/tools/skill_manage.rs").read_text()
+        read_skill = (
+            build.ROOT / "crates/zeroclaw-runtime/src/tools/read_skill.rs"
+        ).read_text()
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            orchestrator = source / "crates/zeroclaw-channels/src/orchestrator/mod.rs"
+            orchestrator.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(
+                build.ROOT / "crates/zeroclaw-channels/src/orchestrator/mod.rs", orchestrator
+            )
+            build.project_enact_matrix_safe_policy(source)
+            projected = orchestrator.read_text()
+        policy = {}
+        for tools, fields in re.findall(
+            r"\(&\[([^\]]*)\],\s*&\[([^\]]*)\]\),", projected
+        ):
+            names = {name.strip().strip('"') for name in tools.split(",") if name.strip()}
+            wanted = {name.strip().strip('"') for name in fields.split(",") if name.strip()}
+            for name in names:
+                policy[name] = wanted
+
+        def fields_of(tool):
+            return policy.get(tool)
+
+        for tool, source_text in (
+            ("read_skill", read_skill),
+            ("skill_view", skills),
+            ("skills_list", skills),
+            ("skill_manage", skills),
+        ):
+            with self.subTest(tool=tool):
+                properties = self.tool_properties(source_text, tool)
+                self.assertIsNotNone(properties, f"{tool} has no schema in the tree")
+                declared = fields_of(tool)
+                self.assertIsNotNone(declared, f"{tool} is not in the Matrix policy")
+                self.assertTrue(
+                    declared.issubset(properties),
+                    f"the Matrix policy names {sorted(declared - properties)} for {tool}, "
+                    f"which it does not accept; it accepts {sorted(properties)}",
+                )
+
     def test_the_scope_filter_consults_the_family_table(self):
         with tempfile.TemporaryDirectory() as name:
             source = Path(name)
