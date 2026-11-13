@@ -309,6 +309,182 @@ class CanonicalToolInventoryTests(unittest.TestCase):
         self.assertIn("check_enact_tool_inventory(SOURCE)", inspect.getsource(build.prepare))
 
 
+class ConsolidatedFamilyTests(unittest.TestCase):
+    """The consolidated families stay in step with the tools they replace.
+
+    A family is an aggregate of its members, so two things follow. The
+    inventory row it gets must carry the compilation group of its members:
+    a row that claims `Always` for a family whose members sit behind
+    `tools-external` promises a tool a default build cannot deliver. And
+    the scope filter must drop a family when the filter drops all of its
+    members: upstream removes the persistent memory tools by name, and a
+    family's own name is not one of theirs.
+    """
+
+    #: The tools upstream removes from a run that asks for no memory.
+    MEMORY_TOOL_NAMES = (
+        "memory_store",
+        "memory_recall",
+        "memory_forget",
+        "memory_export",
+        "memory_purge",
+    )
+
+    def family_table(self):
+        return build._family_table(build.ROOT / "overlays/enact/native/tools/families.rs")
+
+    def upstream_compilations(self, inventory_text):
+        """The compilation group of every inventoried tool, read independently."""
+        groups = {}
+        for name, tier, compilation in re.findall(
+            r'name:\s*"([^"]+)",\s*\n\s*tier:\s*ToolTier::(\w+),\s*\n\s*'
+            r"compilation:\s*BuiltinToolCompilation::(\w+)",
+            inventory_text,
+        ):
+            groups[name] = compilation
+        return groups
+
+    def copy_inputs(self, source, relatives=(
+        "crates/zeroclaw-tools/src/inventory.rs",
+        "crates/zeroclaw-config/src/builtin_tools.rs",
+    )):
+        for relative in relatives:
+            target = source / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(build.ROOT / relative, target)
+
+    def test_the_shipped_family_rows_carry_the_compilation_of_their_members(self):
+        families, _ = self.family_table()
+        upstream = self.upstream_compilations(
+            (build.ROOT / "crates/zeroclaw-tools/src/inventory.rs").read_text()
+        )
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            self.copy_inputs(source)
+            build.project_enact_family_inventory(source)
+            inventory = (source / "crates/zeroclaw-tools/src/inventory.rs").read_text()
+        block = inventory.split(
+            "// Tier 2: host-coupled. The consolidated families.\n", 1
+        )[1].split("// Tier 3: optional. Utilities.\n", 1)[0]
+        rows = re.findall(
+            r'name:\s*"([^"]+)",\s*\n\s*tier:\s*ToolTier::Host,\s*\n\s*'
+            r"compilation:\s*BuiltinToolCompilation::(\w+)",
+            block,
+        )
+        shipped = dict(rows)
+        self.assertEqual(set(shipped), set(families))
+        for family, members in families.items():
+            groups = {upstream[member] for member in members}
+            self.assertEqual(
+                groups,
+                {"Always"} if shipped[family] == "Always" else {"External"},
+                f"the {family} family mixes compilation groups {sorted(groups)}",
+            )
+
+    def test_a_family_compilation_group_that_mixes_its_members_fails_closed(self):
+        families, _ = self.family_table()
+        mixed = dict(families)
+        mixed["memory"] = ("memory_store", "email_search")
+        with self.assertRaisesRegex(RuntimeError, "span the compilation groups"):
+            build.enact_family_compilations(
+                (build.ROOT / "crates/zeroclaw-tools/src/inventory.rs").read_text(), mixed
+            )
+
+    def test_a_family_member_that_is_not_inventoried_fails_closed(self):
+        families, _ = self.family_table()
+        unknown = dict(families)
+        unknown["memory"] = ("memory_store", "memory_not_inventoried")
+        with self.assertRaisesRegex(RuntimeError, "are not inventoried"):
+            build.enact_family_compilations(
+                (build.ROOT / "crates/zeroclaw-tools/src/inventory.rs").read_text(), unknown
+            )
+
+    def test_no_family_mixes_memory_and_other_members(self):
+        """The scope filter drops a family when it drops every member.
+
+        The filter drops the memory tools by name. A family whose members
+        were half memory and half something else would survive on the
+        strength of a member that was never registered, so the families
+        have to be homogeneous in their memory members.
+        """
+        families, _ = self.family_table()
+        for family, members in families.items():
+            memory = [m for m in members if m in self.MEMORY_TOOL_NAMES]
+            other = [m for m in members if m not in self.MEMORY_TOOL_NAMES]
+            self.assertFalse(
+                memory and other,
+                f"the {family} family mixes memory members {memory} with {other}",
+            )
+
+    def test_no_family_carries_a_tool_the_filter_drops_by_itself(self):
+        """`deliver_file` is dropped in an ACP delivery turn, by name."""
+        families, _ = self.family_table()
+        for family, members in families.items():
+            self.assertNotIn("deliver_file", members, f"the {family} family carries deliver_file")
+
+    def test_no_family_is_also_a_member(self):
+        """The family lookup recurses into members; it has to terminate."""
+        families, _ = self.family_table()
+        members = {member for names in families.values() for member in names}
+        self.assertEqual(families.keys() & members, set())
+
+    def test_an_external_family_is_named_in_the_canonical_adapter_list(self):
+        """Upstream checks the external inventory rows against this list.
+
+        A family whose every member is a `tools-external` adapter is one
+        too. If it is missing, upstream's own check fails, and an operator
+        who selects the family in a build without the feature gets no
+        warning that this build cannot carry it.
+        """
+        families, _ = self.family_table()
+        upstream = self.upstream_compilations(
+            (build.ROOT / "crates/zeroclaw-tools/src/inventory.rs").read_text()
+        )
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            self.copy_inputs(source)
+            build.project_enact_family_inventory(source)
+            listed = set(
+                re.findall(
+                    r'"([^"]+)"',
+                    re.search(
+                        r"pub const EXTERNAL_TOOL_NAMES: &\[&str\] = &\[(.*?)\];",
+                        (source / "crates/zeroclaw-config/src/builtin_tools.rs").read_text(),
+                        re.S,
+                    ).group(1),
+                )
+            )
+        external_families = {
+            family
+            for family, members in families.items()
+            if members and all(upstream.get(member) == "External" for member in members)
+        }
+        self.assertTrue(external_families, "no family collects the external adapters")
+        for family in external_families:
+            self.assertIn(family, listed)
+        # The family rows and the canonical list have to agree, or upstream's
+        # "the external compilation rows match the canonical adapter names"
+        # check fails.
+        self.assertEqual(
+            {name for name, group in upstream.items() if group == "External"} | external_families,
+            listed,
+        )
+
+    def test_the_scope_filter_consults_the_family_table(self):
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            target = source / "crates/zeroclaw-runtime/src/tools/scoped.rs"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(build.ROOT / "crates/zeroclaw-runtime/src/tools/scoped.rs", target)
+            build.project_enact_family_scope_filter(source)
+            projected = target.read_text()
+        self.assertIn("crate::tools::families::family_by_name(name)", projected)
+        self.assertIn(
+            ".any(|member| tool_allowed_in_context(member, exclude_memory, acp_delivery))",
+            projected,
+        )
+
+
 class HookInterfaceInstallTests(unittest.TestCase):
     """The hook interface installs once, whatever the crate path is.
 

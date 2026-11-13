@@ -114,6 +114,210 @@ def _family_table(families_rs):
     return families, members
 
 
+def _inventory_compilations(inventory_text):
+    """The compilation group each inventoried tool is built under.
+
+    The inventory records, per tool, whether the tool is always compiled or
+    sits behind a feature group. A consolidated family is built from its
+    members, so it inherits the strongest group they carry.
+    """
+    return {
+        match.group(1): match.group(2)
+        for match in re.finditer(
+            r'name:\s*"([^"]+)",\s*\n\s*tier:\s*ToolTier::\w+,\s*\n\s*'
+            r"compilation:\s*BuiltinToolCompilation::(\w+)",
+            inventory_text,
+        )
+    }
+
+
+def _memory_tool_names():
+    """The tools upstream removes from a run that asks for no memory.
+
+    The list is upstream's, and it is the list the scope filter drops by
+    name — so the overlay reads it rather than restating it.
+    """
+    text = (ROOT / "crates/zeroclaw-tools/src/lib.rs").read_text()
+    match = re.search(
+        r"pub const MEMORY_TOOL_NAMES: &\[&str\] = &\[(.*?)\];", text, re.S
+    )
+    if not match:
+        raise RuntimeError(
+            "Upstream overlay drift: MEMORY_TOOL_NAMES is missing from "
+            "crates/zeroclaw-tools/src/lib.rs"
+        )
+    names = re.findall(r'"([^"]+)"', match.group(1))
+    if not names:
+        raise RuntimeError("Upstream overlay drift: MEMORY_TOOL_NAMES is empty")
+    return names
+
+
+def enact_family_compilations(inventory_text, families):
+    """The compilation group each consolidated family is built under.
+
+    A family is an aggregate of its members: it exists in a build exactly
+    when its members do. `email` collapses two `tools-external` adapters,
+    so the family is an external tool too. An inventory row that claimed
+    otherwise would promise a tool a build without that feature cannot
+    deliver, and upstream's own inventory gate — every compiled row must
+    register under the maximal config — would fail on the missing family.
+    """
+    member_compilations = _inventory_compilations(inventory_text)
+    compilations = {}
+    for name, members in families.items():
+        if not members:
+            raise RuntimeError(
+                f"Upstream overlay drift: the family {name} has no member table"
+            )
+        groups = {member_compilations.get(member) for member in members}
+        if None in groups:
+            raise RuntimeError(
+                f"Upstream overlay drift: the members of {name} are not inventoried"
+            )
+        if groups == {"Always"}:
+            compilations[name] = "Always"
+        elif groups == {"External"}:
+            compilations[name] = "External"
+        else:
+            raise RuntimeError(
+                f"Upstream overlay drift: the members of {name} span the compilation "
+                f"groups {sorted(groups)}, which one inventory row cannot express"
+            )
+    return compilations
+
+
+def project_enact_family_inventory(source):
+    """Give every consolidated family its inventory row.
+
+    The row carries the compilation group of the family's members, so a
+    build that leaves a member's feature group out does not promise the
+    family: upstream's own inventory gate requires every compiled row to
+    register under the maximal config, and a family without its members
+    never registers.
+    """
+    inventory = source / "crates/zeroclaw-tools/src/inventory.rs"
+    families, _ = _family_table(ROOT / "overlays/enact/native/tools/families.rs")
+    family_compilations = enact_family_compilations(inventory.read_text(), families)
+    replace_required(
+        inventory,
+        "    // Tier 3: optional. Utilities.\n",
+        "    // Tier 2: host-coupled. The consolidated families.\n"
+        + "".join(
+            "    BuiltinToolSpec {\n"
+            f'        name: "{name}",\n'
+            "        tier: ToolTier::Host,\n"
+            "        compilation: BuiltinToolCompilation::"
+            f"{family_compilations[name]},\n"
+            "    },\n"
+            for name in (
+                "cron",
+                "sop",
+                "memory",
+                "a2a",
+                "sessions",
+                "model",
+                "mcp",
+                "cloud",
+                "file_uploads",
+                "email",
+            )
+        )
+        + "    // Tier 3: optional. Utilities.\n",
+    )
+    project_enact_external_tool_names(source, families, family_compilations)
+
+
+def project_enact_external_tool_names(source, families, family_compilations):
+    """Name the external families in the canonical adapter list.
+
+    Upstream keeps the `tools-external` adapters in the config crate and
+    checks the inventory against that list: the external compilation rows
+    have to match the canonical adapter names exactly. A family whose every
+    member is one of those adapters is one too, so it joins the list —
+    otherwise upstream's own check fails, and an operator who selects the
+    family in a build without the feature gets no warning that this build
+    cannot carry it.
+    """
+    external = source / "crates/zeroclaw-config/src/builtin_tools.rs"
+    text = external.read_text()
+    match = re.search(
+        r"pub const EXTERNAL_TOOL_NAMES: &\[&str\] = &\[(.*?)\];", text, re.S
+    )
+    if not match:
+        raise RuntimeError(
+            f"Upstream overlay drift: EXTERNAL_TOOL_NAMES is missing from {external}"
+        )
+    listed = re.findall(r'"([^"]+)"', match.group(1))
+    external_families = sorted(
+        name
+        for name, compilation in family_compilations.items()
+        if compilation == "External" and name not in listed
+    )
+    if not external_families:
+        raise RuntimeError(
+            "Upstream overlay drift: no canonical family collects the external adapters"
+        )
+    # The family goes in front of the adapter it consolidates, so the list
+    # reads from the canonical name to the legacy ones.
+    insertion = next(
+        (
+            member
+            for member in listed
+            if any(member in families[family] for family in external_families)
+        ),
+        None,
+    )
+    if insertion is None:
+        raise RuntimeError(
+            f"Upstream overlay drift: no member of {external_families} is listed in "
+            "EXTERNAL_TOOL_NAMES"
+        )
+    anchor = f'    "{insertion}",\n'
+    if text.count(anchor) != 1:
+        raise RuntimeError(
+            f"Upstream overlay drift: expected exactly one {anchor!r} in {external}"
+        )
+    text = text.replace(
+        anchor,
+        "".join(f'    "{name}",\n' for name in external_families) + anchor,
+    )
+    external.write_text(text)
+
+
+def project_enact_family_scope_filter(source):
+    """Drop a family when the scope filter drops every one of its members.
+
+    Upstream drops the persistent memory tools by name, and `deliver_file`
+    in an ACP delivery turn. A family's own name is not one of its members'
+    names, so the filter would keep it: a memory-free run would still be
+    offered the `memory` family, whose actions call the very tools
+    `uses_memory = false` removes.
+    """
+    replace_required(
+        source / "crates/zeroclaw-runtime/src/tools/scoped.rs",
+        "fn tool_allowed_in_context(name: &str, exclude_memory: bool, acp_delivery: bool) -> bool {\n"
+        "    (!exclude_memory || !zeroclaw_tools::MEMORY_TOOL_NAMES.contains(&name))\n"
+        '        && (acp_delivery || name != "deliver_file")\n'
+        "}\n",
+        "fn tool_allowed_in_context(name: &str, exclude_memory: bool, acp_delivery: bool) -> bool {\n"
+        "    // A consolidated family stands for its members, so it is offered\n"
+        "    // only while at least one of them is. The members are dropped by\n"
+        "    // name, and a family's own name is not one of theirs, so without\n"
+        "    // this a memory-free run would still be offered the `memory`\n"
+        "    // family — whose actions call the very tools `uses_memory =\n"
+        "    // false` removes.\n"
+        "    if let Some(family) = crate::tools::families::family_by_name(name) {\n"
+        "        return family\n"
+        "            .members\n"
+        "            .iter()\n"
+        "            .any(|member| tool_allowed_in_context(member, exclude_memory, acp_delivery));\n"
+        "    }\n"
+        "    (!exclude_memory || !zeroclaw_tools::MEMORY_TOOL_NAMES.contains(&name))\n"
+        '        && (acp_delivery || name != "deliver_file")\n'
+        "}\n",
+    )
+
+
 def _tool_declares_action(tool_source):
     """Whether a tool's parameter schema declares an `action` property."""
     text = tool_source.read_text()
@@ -1867,32 +2071,7 @@ def project_enact_tool_families(source):
             )
 
     # ── the inventory rows ──────────────────────────────────────────────
-    inventory = source / "crates/zeroclaw-tools/src/inventory.rs"
-    replace_required(
-        inventory,
-        "    // Tier 3: optional. Utilities.\n",
-        "    // Tier 2: host-coupled. The consolidated families.\n"
-        + "".join(
-            "    BuiltinToolSpec {\n"
-            f'        name: "{name}",\n'
-            "        tier: ToolTier::Host,\n"
-            "        compilation: BuiltinToolCompilation::Always,\n"
-            "    },\n"
-            for name in (
-                "cron",
-                "sop",
-                "memory",
-                "a2a",
-                "sessions",
-                "model",
-                "mcp",
-                "cloud",
-                "file_uploads",
-                "email",
-            )
-        )
-        + "    // Tier 3: optional. Utilities.\n",
-    )
+    project_enact_family_inventory(source)
 
     # ── the inventory docs page ──────────────────────────────────────────
     replace_required(
@@ -1917,6 +2096,9 @@ def project_enact_tool_families(source):
         "        .iter()\n"
         "        .filter(|tool| !excluded_tools.iter().any(|ex| ex == tool.name()))\n"
     )
+
+    # ── a family is offered only while one of its members is ─────────────
+    project_enact_family_scope_filter(source)
 
     # ── the family tools that need a live server to exist ────────────────
     # The `mcp` family collapses `mcp_resources` and `mcp_prompts`, which are
@@ -2952,6 +3134,11 @@ def project_enact_builtin_selection_fixture(source):
     The fixture is a snapshot of the tools a full chat configuration
     assembles. Every tool the overlay adds — and every canonical family the
     consolidation adds — belongs in it.
+
+    The ACP branch drops the persistent memory tools. A canonical family
+    stands for its members, so a family whose every member is a memory tool
+    goes with them: the ACP turn must not be offered a `memory` family whose
+    actions call tools the turn has removed.
     """
     fixture = source / "crates/zeroclaw-runtime/tests/builtin_selection_boundary.rs"
     text = fixture.read_text()
@@ -2959,7 +3146,40 @@ def project_enact_builtin_selection_fixture(source):
     if text.count(anchor) != 1:
         raise RuntimeError(f"Upstream overlay drift: expected one {anchor!r} in {fixture}")
     additions = "".join(f'        "{name}",\n' for name in ("ast_edit", "ast_grep", "callgraph", "compose", "expand", "graph", "radar", "cron", "learn", "memory", "model", "sessions", "skill_manage", "skill_view", "skills_list", "wait"))
-    fixture.write_text(text.replace(anchor, anchor + additions))
+    text = text.replace(anchor, anchor + additions)
+
+    memory_tools = _memory_tool_names()
+    families, _ = _family_table(ROOT / "overlays/enact/native/tools/families.rs")
+    dropped = sorted(
+        name
+        for name, members in families.items()
+        if members and all(member in memory_tools for member in members)
+    )
+    if not dropped:
+        raise RuntimeError(
+            "Upstream overlay drift: no canonical family collects the persistent memory tools"
+        )
+    retain_anchor = (
+        "            expected.retain(|name| "
+        "!zeroclaw_tools::MEMORY_TOOL_NAMES.contains(&name.as_str()));\n"
+    )
+    if text.count(retain_anchor) != 1:
+        raise RuntimeError(
+            f"Upstream overlay drift: expected one {retain_anchor!r} in {fixture}"
+        )
+    text = text.replace(
+        retain_anchor,
+        retain_anchor
+        + "            // A canonical family stands for its members: when every\n"
+        + "            // member is a memory tool, the family goes with them.\n"
+        + "            expected.retain(|name| !matches!(\n"
+        + "                name.as_str(),\n"
+        + "                "
+        + " | ".join(f'"{name}"' for name in dropped)
+        + "\n"
+        + "            ));\n",
+    )
+    fixture.write_text(text)
 
 
 def project_enact_branding_consistency(source):
