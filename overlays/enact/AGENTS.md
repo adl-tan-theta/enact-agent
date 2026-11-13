@@ -29,6 +29,10 @@ successful compile as proof that a release asset exists or passes its fixture.
 
 - Preserve upstream `origin`, the `enact` fork remote, licenses, copyrights and
   `NOTICE`. Work on review branches; never edit or push directly to `master`.
+- Open pull requests against `enact/branding` in `adl-tan-theta/enact-agent`.
+  Never open a pull request against `zeroclaw-labs/zeroclaw` upstream: upstream is
+  the source that is reviewed and merged in, never the destination of a change.
+  Upstream's own `master` rules govern upstream's repository, not this fork.
 - Keep fork-only native branding/RPC adaptations in `build.py`, not tracked
   `src/` or `crates/` Rust. Upstream merges may update upstream Rust normally.
 - `prepare` deletes/recreates `target/enact/source/`. Never hand-edit this output
@@ -60,6 +64,33 @@ Upstream may change. There is no guarantee that future merges cannot break the
 fork. Checked single-match anchors and constructor counts fail closed on known
 drift; they do not prove semantic compatibility. An anchor failure blocks release
 until reviewed adaptation and target requalification pass.
+
+## Related repositories
+
+| Repository | Branch/role |
+| --- | --- |
+| `adl-tan-theta/enact-agent` (remote `enact`) | this fork; `enact/branding` is the integration branch and the base for every pull request |
+| `zeroclaw-labs/zeroclaw` (remote `origin`) | upstream source; read, review and merge in — never push or open a pull request here |
+| `adl-tan-theta/enact-tools` | workspace repo for the tool-surface review, the report generators and the `enact-bridge` host adapter |
+
+The workspace repo is host-facing and lives outside the product tree: it installs
+into Codex CLI and Claude Code, mirrors their own policies, and generates the
+canonical registry from this repo's overlay CSV. Changes to the product's tool
+surface still land here, in the overlay — not in the workspace repo.
+
+## Pull requests
+
+Base every pull request on `enact/branding`:
+
+```sh
+gh pr create --repo adl-tan-theta/enact-agent \
+  --base enact/branding --head <branch> \
+  --title "feat(<scope>): <description>"
+```
+
+Titles must satisfy `scripts/check-pr-title.sh` (`type(scope): description`, with
+a scope). Always pass `--repo adl-tan-theta/enact-agent` explicitly: `gh` resolves
+the repository from the `origin` remote otherwise, which is upstream.
 
 ## Install the published headless release
 
