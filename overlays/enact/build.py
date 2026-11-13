@@ -3182,6 +3182,40 @@ def project_enact_builtin_selection_fixture(source):
     fixture.write_text(text)
 
 
+def project_enact_matrix_safe_policy(source):
+    """Keep the Matrix safe policy in step with the tools the fork registers.
+
+    Two upstream expectations go stale when the fork makes the skill tools
+    first-class.
+
+    Upstream deliberately leaves `skills_list`, `skill_view` and
+    `skill_manage` out of the built-in inventory and allows for them in the
+    Matrix policy's test. The fork registers and inventories them, so the
+    allowlist has to let them go — and the policy's field list has to name
+    the arguments the tools really take: `skill_view` and `skill_manage`
+    take a `slug`, and `skills_list` takes none.
+    """
+    orchestrator = source / "crates/zeroclaw-channels/src/orchestrator/mod.rs"
+    replace_required(
+        orchestrator,
+        '            // Registered only by the opt-in background skill review.\n'
+        '            "skills_list",\n'
+        '            "skill_view",\n'
+        '            "skill_manage",\n',
+        "",
+    )
+    replace_required(
+        orchestrator,
+        '    (&["read_skill", "skill_view"], &["name"]),\n'
+        '    (&["skills_list"], &["source"]),\n'
+        '    (&["skill_manage"], &["action", "name"]),\n',
+        '    (&["read_skill"], &["name"]),\n'
+        '    (&["skill_view"], &["slug"]),\n'
+        '    (&["skills_list"], &[]),\n'
+        '    (&["skill_manage"], &["action", "slug"]),\n',
+    )
+
+
 def project_enact_branding_consistency(source):
     """Keep the branded tree's own expectations in step with its branding.
 
@@ -3246,6 +3280,7 @@ def project_enact_branding_consistency(source):
     for relative in (
         "crates/zeroclaw-runtime/src/skills/mod.rs",
         "crates/zeroclaw-runtime/src/tools/read_skill.rs",
+        "crates/zeroclaw-channels/src/orchestrator/mod.rs",
     ):
         path = source / relative
         text = path.read_text()
@@ -3496,6 +3531,7 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
     project_enact_plugin_hooks(SOURCE)
     project_enact_branding_consistency(SOURCE)
     project_enact_builtin_selection_fixture(SOURCE)
+    project_enact_matrix_safe_policy(SOURCE)
     project_enact_agent_capabilities(SOURCE)
     project_enact_config_dir_branding(SOURCE)
 
