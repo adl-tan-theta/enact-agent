@@ -602,11 +602,29 @@ def project_workspace_owned_agent_paths(source):
 def project_session_tools(source):
     """Expose only the instantiated session registry through existing RPC guards."""
     dispatch = source / "crates/zeroclaw-runtime/src/rpc/dispatch.rs"
+    # The wire contract lives in the published `zeroclaw-rpc-proto` crate:
+    # the method enum, the wire-name table and the declared contract are all
+    # upstream's, and the overlay adds a variant to them rather than
+    # reshaping them.
+    method = source / "crates/zeroclaw-rpc-proto/src/method.rs"
+    proto_types = source / "crates/zeroclaw-rpc-proto/src/types.rs"
+    proto_schema = source / "crates/zeroclaw-rpc-proto/src/schema.rs"
     for old, new in (
         ("    SessionState,\n", "    SessionState,\n    SessionTools,\n"),
         ('        (Method::SessionState, "session/state"),\n',
          '        (Method::SessionState, "session/state"),\n'
          '        (Method::SessionTools, "session/tools"),\n'),
+    ):
+        replace_required(method, old, new)
+    # The declared contract. The match is arm-complete over the closed enum,
+    # so the new variant has to say what it accepts and what it returns.
+    replace_required(
+        method,
+        '            M::SessionState => (Typed("SessionIdParams"), Typed("SessionStateResult")),\n',
+        '            M::SessionState => (Typed("SessionIdParams"), Typed("SessionStateResult")),\n'
+        '            M::SessionTools => (Typed("SessionIdParams"), Typed("SessionToolsResult")),\n',
+    )
+    for old, new in (
         ("            | M::SessionState\n", "            | M::SessionState\n            | M::SessionTools\n"),
         ("                | Method::SessionState\n",
          "                | Method::SessionState\n                | Method::SessionTools\n"),
@@ -642,11 +660,23 @@ def project_session_tools(source):
 '''
     replace_required(dispatch, "    async fn handle_session_state(&self, params: &Value) -> RpcResult {",
                      handler + "    async fn handle_session_state(&self, params: &Value) -> RpcResult {")
-    replace_required(source / "crates/zeroclaw-runtime/src/rpc/types.rs",
+    # The result type lives beside the other wire-stable types, in the crate
+    # that owns the wire contract. The runtime re-exports it, so the
+    # dispatcher resolves it through `use crate::rpc::types::*`.
+    replace_required(proto_types,
                      "rpc_type! {\n    pub struct SessionStateResult {",
                      "rpc_type! {\n    pub struct SessionToolsResult {\n"
                      "        pub session_id: String,\n        pub tools: Vec<String>,\n    }\n}\n\n"
                      "rpc_type! {\n    pub struct SessionStateResult {")
+    # The schema catalog is exclusive: a typed contract resolves to a
+    # catalog-defined schema or to an external owner, never to both and never
+    # to neither. The new result type is catalog-defined.
+    replace_required(
+        proto_schema,
+        "    MessageEntryKind, MessageEntry, SessionStateResult, SessionDeleteResult, SessionOverrides,\n",
+        "    MessageEntryKind, MessageEntry, SessionStateResult, SessionToolsResult,\n"
+        "    SessionDeleteResult, SessionOverrides,\n",
+    )
     # Canonical names come from the assembled Agent registry, after MCP startup
     # and tool-policy filtering. No config-derived inventory or cached copy.
     replace_required(source / "crates/zeroclaw-runtime/src/agent/agent.rs",
@@ -676,7 +706,7 @@ def project_tool_result_status(source):
                      "            output,\n            success,\n            artifact: _,\n        } => SessionUpdateEvent::ToolResult {")
     replace_required(dispatch, "            raw_output: output.clone(),",
                      "            raw_output: output.clone(),\n            success: *success,")
-    replace_required(source / "crates/zeroclaw-runtime/src/rpc/types.rs",
+    replace_required(source / "crates/zeroclaw-rpc-proto/src/types.rs",
                      "        raw_output: String,\n    },\n    ApprovalRequest {",
                      "        raw_output: String,\n        #[serde(default)]\n"
                      "        success: Option<bool>,\n    },\n    ApprovalRequest {")

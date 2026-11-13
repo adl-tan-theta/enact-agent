@@ -74,8 +74,10 @@ use zeroclaw_runtime::rpc;
 class SessionToolsProjectionTests(unittest.TestCase):
     def test_actual_upstream_rpc_guards_registry_and_inventory_getter(self):
         paths = ["crates/zeroclaw-runtime/src/rpc/dispatch.rs",
-                 "crates/zeroclaw-runtime/src/rpc/types.rs",
-                 "crates/zeroclaw-runtime/src/agent/agent.rs"]
+                 "crates/zeroclaw-runtime/src/agent/agent.rs",
+                 "crates/zeroclaw-rpc-proto/src/method.rs",
+                 "crates/zeroclaw-rpc-proto/src/types.rs",
+                 "crates/zeroclaw-rpc-proto/src/schema.rs"]
         with tempfile.TemporaryDirectory() as name:
             source = Path(name)
             for relative in paths:
@@ -84,7 +86,17 @@ class SessionToolsProjectionTests(unittest.TestCase):
                 shutil.copy2(build.ROOT / relative, target)
             build.project_session_tools(source)
             dispatch = (source / paths[0]).read_text()
-            self.assertIn('(Method::SessionTools, "session/tools")', dispatch)
+            method = (source / paths[2]).read_text()
+            proto_types = (source / paths[3]).read_text()
+            catalog = (source / paths[4]).read_text()
+            # The wire contract is upstream's: the variant, its wire name, its
+            # declared contract and its schema all live in the proto crate.
+            self.assertIn('    SessionTools,\n', method)
+            self.assertIn('(Method::SessionTools, "session/tools")', method)
+            self.assertIn('M::SessionTools => (Typed("SessionIdParams"), Typed("SessionToolsResult"))',
+                          method)
+            self.assertIn('pub struct SessionToolsResult {', proto_types)
+            self.assertIn('SessionToolsResult,', catalog)
             self.assertIn('| M::SessionTools\n', dispatch)
             self.assertIn('| Method::SessionTools\n', dispatch)
             handler = dispatch.split('    async fn handle_session_tools(', 1)[1].split(
@@ -96,7 +108,7 @@ class SessionToolsProjectionTests(unittest.TestCase):
             self.assertIn('agent.tool_names()', handler)
             self.assertNotIn('self.ctx.config', handler)
             self.assertNotIn('provider', handler)
-            self.assertNotIn('#[cfg(test)]\n    pub fn tool_names', (source / paths[2]).read_text())
+            self.assertNotIn('#[cfg(test)]\n    pub fn tool_names', (source / paths[1]).read_text())
             with self.assertRaisesRegex(RuntimeError, 'Upstream overlay drift'):
                 build.project_session_tools(source)
 
@@ -108,7 +120,7 @@ class ToolResultStatusProjectionTests(unittest.TestCase):
                  "crates/zeroclaw-runtime/src/agent/turn/events.rs",
                  "crates/zeroclaw-runtime/src/agent/turn/stream_consume.rs",
                  "crates/zeroclaw-runtime/src/rpc/dispatch.rs",
-                 "crates/zeroclaw-runtime/src/rpc/types.rs",
+                 "crates/zeroclaw-rpc-proto/src/types.rs",
                  "crates/zeroclaw-runtime/src/rpc/turn.rs",
                  "crates/zeroclaw-channels/src/orchestrator/acp_server.rs"]
         with tempfile.TemporaryDirectory() as name:
