@@ -1,0 +1,142 @@
+/* Distribution snapshot of Enact OS Warm Continuity v2.
+   Authority: enact-launch-kit/brand/tokens/brand-tokens.css and
+   website/website-tokens.css at acb8ee7ed0ea36403ccfe9d217b8aac3d1749e74.
+   Dark semantic roles follow brand/enact-liquid-glass-token-spec.md.
+   Scope stays on the pairing surface; ThemeContext owns saved preferences. */
+@font-face {
+  font-family: "DM Sans";
+  src: url("fonts/DMSans-variable.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 1000;
+  font-display: swap;
+}
+
+.enact-pairing {
+  --enact-primary: #4a3154;
+  --enact-orchid: #9b719d;
+  --enact-canvas: #fbf8f4;
+  --enact-surface: #ffffff;
+  --enact-text: #2e2332;
+  --enact-muted: #66596c;
+  --enact-border: #88748c;
+  --enact-hairline: color-mix(in srgb, var(--enact-primary) 13%, var(--enact-canvas));
+  --enact-focus: var(--enact-primary);
+  --enact-error: #ad3f4e;
+  --enact-radius-control: 12px;
+  --enact-radius-panel: 20px;
+  --enact-radius-card: 32px;
+  --enact-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --enact-hover: 180ms;
+  --enact-shadow: 0 12px 42px rgb(74 49 84 / 8%);
+  --pc-bg-base: var(--enact-canvas);
+  --pc-bg-surface: var(--enact-surface);
+  --pc-bg-elevated: color-mix(in srgb, var(--enact-orchid) 8%, var(--enact-surface));
+  --pc-bg-input: var(--enact-canvas);
+  --pc-bg-code: var(--enact-canvas);
+  --pc-text-primary: var(--enact-text);
+  --pc-text-muted: var(--enact-muted);
+  --pc-border: var(--enact-border);
+  --pc-accent: var(--enact-primary);
+  --pc-accent-dim: var(--enact-focus);
+  --pc-accent-glow: color-mix(in srgb, var(--enact-focus) 12%, transparent);
+  --pc-focus: var(--enact-focus);
+  --color-status-error: var(--enact-error);
+  box-sizing: border-box;
+  min-height: 100svh;
+  padding: clamp(20px, 4vw, 48px);
+  background: var(--enact-canvas);
+  color: var(--enact-text);
+  font-family: "DM Sans", Arial, sans-serif;
+  line-height: 1.65;
+  color-scheme: light;
+}
+
+.enact-pairing[data-enact-mode="dark"] {
+  --enact-primary: #65466b;
+  --enact-canvas: #19151f;
+  --enact-surface: #372b3c;
+  --enact-text: #f6eef4;
+  --enact-muted: #c1aebc;
+  --enact-border: #9f87a4;
+  --enact-hairline: color-mix(in srgb, var(--enact-border) 35%, var(--enact-surface));
+  --enact-focus: #f29a83;
+  --enact-error: #ffaaa9;
+  --enact-shadow: 0 16px 40px rgb(0 0 0 / 45%);
+  color-scheme: dark;
+}
+
+.enact-pairing-card {
+  padding: clamp(24px, 5vw, 40px);
+  background: var(--enact-surface);
+  border: 1px solid var(--enact-hairline);
+  border-radius: var(--enact-radius-card);
+  box-shadow: var(--enact-shadow);
+}
+
+.enact-pairing-mark {
+  display: block;
+  width: 80px;
+  height: 80px;
+  margin: 0 auto 24px;
+}
+
+.enact-pairing-title {
+  color: var(--enact-text);
+  font-size: clamp(1.75rem, 4vw, 2rem);
+  font-weight: 620;
+  letter-spacing: -0.04em;
+  line-height: 1.02;
+  text-wrap: balance;
+}
+
+.enact-pairing-notice {
+  border-radius: var(--enact-radius-panel);
+}
+
+.enact-pairing-recovery {
+  border-radius: var(--enact-radius-control);
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
+.enact-pairing .btn-electric,
+.enact-pairing .input-electric {
+  min-height: 44px;
+  border-radius: var(--enact-radius-control);
+  transition: background-color var(--enact-hover) var(--enact-ease),
+    border-color var(--enact-hover) var(--enact-ease);
+}
+
+.enact-pairing .btn-electric {
+  background: var(--enact-primary);
+  color: #ffffff;
+}
+
+.enact-pairing .btn-electric:hover:not(:disabled) {
+  opacity: 1;
+  background: color-mix(in srgb, var(--enact-primary) 88%, var(--enact-text));
+  box-shadow: none;
+}
+
+.enact-pairing .btn-electric:disabled {
+  opacity: 0.6;
+}
+
+.enact-pairing .input-electric:focus {
+  border-color: var(--enact-focus);
+  box-shadow: none;
+  outline: 2px solid var(--enact-focus);
+  outline-offset: 3px;
+}
+
+.enact-pairing :focus-visible {
+  outline: 2px solid var(--enact-focus);
+  outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .enact-pairing .btn-electric,
+  .enact-pairing .input-electric {
+    transition: none;
+  }
+}
