@@ -27,10 +27,14 @@ impl Tool for CalculatorTool {
     }
 
     fn description(&self) -> &str {
-        "Perform arithmetic and statistical calculations. Supports 25 functions: \
+        "Perform arithmetic and statistical calculations. Supports 26 functions: \
          add, subtract, divide, multiply, pow, sqrt, abs, modulo, round, \
          log, ln, exp, factorial, sum, average, median, mode, min, max, \
          range, variance, stdev, percentile, count, percentage_change, clamp. \
+         EVERY function takes its numbers as one array `values` (plus `function`; percentile also takes `p`). \
+         Order matters: divide = values[0] / values[1] / ...; subtract = values[0] - values[1] - ...; \
+         pow = values[0] ^ values[1]; modulo = values[0] % values[1]; \
+         percentage_change = change from values[0] (old) to values[1] (new), as a percent of values[0]. \
          Use this tool whenever you need to compute a numeric result instead of guessing."
     }
 
@@ -40,12 +44,13 @@ impl Tool for CalculatorTool {
             "properties": {
                 "function": {
                     "type": "string",
-                    "description": "Calculation to perform. \
-                        Arithmetic: add(values), subtract(values), divide(values), multiply(values), pow(a,b), sqrt(x), abs(x), modulo(a,b), round(x,decimals). \
-                        Logarithmic/exponential: log(x,base?), ln(x), exp(x), factorial(x). \
-                        Aggregation: sum(values), average(values), count(values), min(values), max(values), range(values). \
-                        Statistics: median(values), mode(values), variance(values), stdev(values), percentile(values,p). \
-                        Utility: percentage_change(a,b), clamp(x,min_val,max_val).",
+                    "description": "Calculation to perform. All numbers go in `values`, in this order. \
+                        Arithmetic: add(values: 2+), subtract(values: first minus the rest), divide(values: first divided by the rest), multiply(values: 2+), \
+                        pow(values: [base, exponent]), sqrt(values: [x]), abs(values: [x]), modulo(values: [dividend, divisor]), round(values: [x, decimals]). \
+                        Logarithmic/exponential: log(values: [x] or [x, base], base defaults to 10), ln(values: [x]), exp(values: [x]), factorial(values: [n]). \
+                        Aggregation: sum, average, count, min, max, range (values: 1+ numbers). \
+                        Statistics: median, mode, variance, stdev (values: the data), percentile(values: the data, plus p). \
+                        Utility: percentage_change(values: [old, new]), clamp(values: [x, min, max]).",
                     "enum": [
                         "add", "subtract", "divide", "multiply", "pow", "sqrt",
                         "abs", "modulo", "round", "log", "ln", "exp", "factorial",
@@ -57,42 +62,14 @@ impl Tool for CalculatorTool {
                 "values": {
                     "type": "array",
                     "items": { "type": "number" },
-                    "description": "Array of numeric values. Required for: add, subtract, divide, multiply, sum, average, median, mode, min, max, range, variance, stdev, percentile, count."
-                },
-                "a": {
-                    "type": "number",
-                    "description": "First operand. Required for: pow, modulo, percentage_change."
-                },
-                "b": {
-                    "type": "number",
-                    "description": "Second operand. Required for: pow, modulo, percentage_change."
-                },
-                "x": {
-                    "type": "number",
-                    "description": "Input number. Required for: sqrt, abs, exp, ln, log, factorial."
-                },
-                "base": {
-                    "type": "number",
-                    "description": "Logarithm base (default: 10). Optional for: log."
-                },
-                "decimals": {
-                    "type": "integer",
-                    "description": "Number of decimal places for rounding. Required for: round."
+                    "description": "The numbers, in the order given in `function`. Exactly 2 for pow, modulo, round, percentage_change; exactly 1 for sqrt, abs, ln, exp, factorial; 1 or 2 for log; exactly 3 for clamp; 2 or more for add, subtract, divide, multiply; 1 or more for the aggregation and statistics functions."
                 },
                 "p": {
                     "type": "integer",
-                    "description": "Percentile rank (0-100). Required for: percentile."
-                },
-                "min_val": {
-                    "type": "number",
-                    "description": "Minimum bound. Required for: clamp."
-                },
-                "max_val": {
-                    "type": "number",
-                    "description": "Maximum bound. Required for: clamp."
+                    "description": "Percentile rank (0-100). Required for: percentile only."
                 }
             },
-            "required": ["function"]
+            "required": ["function", "values"]
         })
     }
 
@@ -174,10 +151,25 @@ impl Tool for CalculatorTool {
     }
 }
 
-fn extract_f64(args: &serde_json::Value, key: &str, name: &str) -> Result<f64, String> {
-    args.get(key)
-        .and_then(|v| v.as_f64())
-        .ok_or_else(|| format!("Missing required parameter: {name}"))
+/// Exactly `n` numbers from `values`, in order. Wrong count is a named error.
+fn extract_exact(args: &serde_json::Value, n: usize) -> Result<Vec<f64>, String> {
+    let values = extract_values(args, n)?;
+    if values.len() != n {
+        return Err(format!(
+            "Expected exactly {n} value(s) in `values`, got {}",
+            values.len()
+        ));
+    }
+    Ok(values)
+}
+
+fn extract_pair(args: &serde_json::Value) -> Result<(f64, f64), String> {
+    let v = extract_exact(args, 2)?;
+    Ok((v[0], v[1]))
+}
+
+fn extract_one(args: &serde_json::Value) -> Result<f64, String> {
+    Ok(extract_exact(args, 1)?[0])
 }
 
 fn extract_i64(args: &serde_json::Value, key: &str, name: &str) -> Result<i64, String> {
@@ -267,13 +259,12 @@ fn calc_multiply(args: &serde_json::Value) -> Result<String, String> {
 }
 
 fn calc_pow(args: &serde_json::Value) -> Result<String, String> {
-    let base = extract_f64(args, "a", "a (base)")?;
-    let exp = extract_f64(args, "b", "b (exponent)")?;
+    let (base, exp) = extract_pair(args)?;
     Ok(format_num(base.powf(exp)))
 }
 
 fn calc_sqrt(args: &serde_json::Value) -> Result<String, String> {
-    let x = extract_f64(args, "x", "x")?;
+    let x = extract_one(args)?;
     if x < 0.0 {
         return Err("Cannot compute square root of a negative number".to_string());
     }
@@ -281,13 +272,12 @@ fn calc_sqrt(args: &serde_json::Value) -> Result<String, String> {
 }
 
 fn calc_abs(args: &serde_json::Value) -> Result<String, String> {
-    let x = extract_f64(args, "x", "x")?;
+    let x = extract_one(args)?;
     Ok(format_num(x.abs()))
 }
 
 fn calc_modulo(args: &serde_json::Value) -> Result<String, String> {
-    let a = extract_f64(args, "a", "a")?;
-    let b = extract_f64(args, "b", "b")?;
+    let (a, b) = extract_pair(args)?;
     if b == 0.0 {
         return Err("Modulo by zero".to_string());
     }
@@ -295,8 +285,11 @@ fn calc_modulo(args: &serde_json::Value) -> Result<String, String> {
 }
 
 fn calc_round(args: &serde_json::Value) -> Result<String, String> {
-    let x = extract_f64(args, "x", "x")?;
-    let decimals = extract_i64(args, "decimals", "decimals")?;
+    let (x, decimals_f) = extract_pair(args)?;
+    if decimals_f != decimals_f.floor() {
+        return Err("decimals (values[1]) must be an integer".to_string());
+    }
+    let decimals = decimals_f as i64;
     if decimals < 0 {
         return Err("decimals must be non-negative".to_string());
     }
@@ -308,11 +301,15 @@ fn calc_round(args: &serde_json::Value) -> Result<String, String> {
 }
 
 fn calc_log(args: &serde_json::Value) -> Result<String, String> {
-    let x = extract_f64(args, "x", "x")?;
+    let values = extract_values(args, 1)?;
+    if values.len() > 2 {
+        return Err(format!("log takes [x] or [x, base], got {} values", values.len()));
+    }
+    let x = values[0];
     if x <= 0.0 {
         return Err("Logarithm requires a positive number".to_string());
     }
-    let base = args.get("base").and_then(|v| v.as_f64()).unwrap_or(10.0);
+    let base = values.get(1).copied().unwrap_or(10.0);
     if base <= 0.0 || base == 1.0 {
         return Err("Logarithm base must be positive and not equal to 1".to_string());
     }
@@ -320,7 +317,7 @@ fn calc_log(args: &serde_json::Value) -> Result<String, String> {
 }
 
 fn calc_ln(args: &serde_json::Value) -> Result<String, String> {
-    let x = extract_f64(args, "x", "x")?;
+    let x = extract_one(args)?;
     if x <= 0.0 {
         return Err("Natural logarithm requires a positive number".to_string());
     }
@@ -328,12 +325,12 @@ fn calc_ln(args: &serde_json::Value) -> Result<String, String> {
 }
 
 fn calc_exp(args: &serde_json::Value) -> Result<String, String> {
-    let x = extract_f64(args, "x", "x")?;
+    let x = extract_one(args)?;
     Ok(format_num(x.exp()))
 }
 
 fn calc_factorial(args: &serde_json::Value) -> Result<String, String> {
-    let x = extract_f64(args, "x", "x")?;
+    let x = extract_one(args)?;
     if x < 0.0 || x != x.floor() {
         return Err("Factorial requires a non-negative integer".to_string());
     }
@@ -479,8 +476,7 @@ fn calc_count(args: &serde_json::Value) -> Result<String, String> {
 }
 
 fn calc_percentage_change(args: &serde_json::Value) -> Result<String, String> {
-    let old = extract_f64(args, "a", "a (old value)")?;
-    let new = extract_f64(args, "b", "b (new value)")?;
+    let (old, new) = extract_pair(args)?;
     if old == 0.0 {
         return Err("Cannot compute percentage change from zero".to_string());
     }
@@ -488,9 +484,8 @@ fn calc_percentage_change(args: &serde_json::Value) -> Result<String, String> {
 }
 
 fn calc_clamp(args: &serde_json::Value) -> Result<String, String> {
-    let x = extract_f64(args, "x", "x")?;
-    let min_val = extract_f64(args, "min_val", "min_val")?;
-    let max_val = extract_f64(args, "max_val", "max_val")?;
+    let v = extract_exact(args, 3)?;
+    let (x, min_val, max_val) = (v[0], v[1], v[2]);
     if min_val > max_val {
         return Err("min_val must be less than or equal to max_val".to_string());
     }
@@ -560,7 +555,7 @@ mod tests {
     async fn test_pow() {
         let tool = CalculatorTool::new();
         let result = tool
-            .execute(json!({"function": "pow", "a": 2.0, "b": 10.0}))
+            .execute(json!({"function": "pow", "values": [2.0, 10.0]}))
             .await
             .unwrap();
         assert!(result.success);
@@ -571,7 +566,7 @@ mod tests {
     async fn test_sqrt() {
         let tool = CalculatorTool::new();
         let result = tool
-            .execute(json!({"function": "sqrt", "x": 144.0}))
+            .execute(json!({"function": "sqrt", "values": [144.0]}))
             .await
             .unwrap();
         assert!(result.success);
@@ -582,7 +577,7 @@ mod tests {
     async fn test_sqrt_negative() {
         let tool = CalculatorTool::new();
         let result = tool
-            .execute(json!({"function": "sqrt", "x": -4.0}))
+            .execute(json!({"function": "sqrt", "values": [-4.0]}))
             .await
             .unwrap();
         assert!(!result.success);
@@ -592,7 +587,7 @@ mod tests {
     async fn test_abs() {
         let tool = CalculatorTool::new();
         let result = tool
-            .execute(json!({"function": "abs", "x": -42.5}))
+            .execute(json!({"function": "abs", "values": [-42.5]}))
             .await
             .unwrap();
         assert!(result.success);
@@ -603,7 +598,7 @@ mod tests {
     async fn test_modulo() {
         let tool = CalculatorTool::new();
         let result = tool
-            .execute(json!({"function": "modulo", "a": 17.0, "b": 5.0}))
+            .execute(json!({"function": "modulo", "values": [17.0, 5.0]}))
             .await
             .unwrap();
         assert!(result.success);
@@ -614,7 +609,7 @@ mod tests {
     async fn test_round() {
         let tool = CalculatorTool::new();
         let result = tool
-            .execute(json!({"function": "round", "x": 2.715, "decimals": 2}))
+            .execute(json!({"function": "round", "values": [2.715, 2]}))
             .await
             .unwrap();
         assert!(result.success);
@@ -625,7 +620,7 @@ mod tests {
     async fn test_round_rejects_excessive_decimals() {
         let tool = CalculatorTool::new();
         let result = tool
-            .execute(json!({"function": "round", "x": 2.715, "decimals": 1_000_000}))
+            .execute(json!({"function": "round", "values": [2.715, 1_000_000]}))
             .await
             .unwrap();
         assert!(!result.success);
@@ -673,7 +668,7 @@ mod tests {
     async fn test_log_base10() {
         let tool = CalculatorTool::new();
         let result = tool
-            .execute(json!({"function": "log", "x": 100.0}))
+            .execute(json!({"function": "log", "values": [100.0]}))
             .await
             .unwrap();
         assert!(result.success);
@@ -684,7 +679,7 @@ mod tests {
     async fn test_log_custom_base() {
         let tool = CalculatorTool::new();
         let result = tool
-            .execute(json!({"function": "log", "x": 8.0, "base": 2.0}))
+            .execute(json!({"function": "log", "values": [8.0, 2.0]}))
             .await
             .unwrap();
         assert!(result.success);
@@ -695,7 +690,7 @@ mod tests {
     async fn test_ln() {
         let tool = CalculatorTool::new();
         let result = tool
-            .execute(json!({"function": "ln", "x": 1.0}))
+            .execute(json!({"function": "ln", "values": [1.0]}))
             .await
             .unwrap();
         assert!(result.success);
@@ -706,7 +701,7 @@ mod tests {
     async fn test_exp() {
         let tool = CalculatorTool::new();
         let result = tool
-            .execute(json!({"function": "exp", "x": 0.0}))
+            .execute(json!({"function": "exp", "values": [0.0]}))
             .await
             .unwrap();
         assert!(result.success);
@@ -717,7 +712,7 @@ mod tests {
     async fn test_factorial() {
         let tool = CalculatorTool::new();
         let result = tool
-            .execute(json!({"function": "factorial", "x": 5.0}))
+            .execute(json!({"function": "factorial", "values": [5.0]}))
             .await
             .unwrap();
         assert!(result.success);
@@ -728,7 +723,7 @@ mod tests {
     async fn test_factorial_max_input() {
         let tool = CalculatorTool::new();
         let result = tool
-            .execute(json!({"function": "factorial", "x": 34.0}))
+            .execute(json!({"function": "factorial", "values": [34.0]}))
             .await
             .unwrap();
         assert!(result.success);
@@ -741,7 +736,7 @@ mod tests {
         // 35! overflows the u128 accumulator (~1.03e40 > u128::MAX ~3.40e38).
         // This must return a graceful error rather than panicking on overflow.
         let result = tool
-            .execute(json!({"function": "factorial", "x": 35.0}))
+            .execute(json!({"function": "factorial", "values": [35.0]}))
             .await
             .unwrap();
         assert!(!result.success);
@@ -879,7 +874,7 @@ mod tests {
     async fn test_percentage_change() {
         let tool = CalculatorTool::new();
         let result = tool
-            .execute(json!({"function": "percentage_change", "a": 50.0, "b": 75.0}))
+            .execute(json!({"function": "percentage_change", "values": [50.0, 75.0]}))
             .await
             .unwrap();
         assert!(result.success);
@@ -887,10 +882,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_two_operand_functions_require_exactly_two_values_in_order() {
+        let tool = CalculatorTool::new();
+        let r = tool
+            .execute(json!({"function": "divide", "values": [10.0, 4.0]}))
+            .await
+            .unwrap();
+        assert_eq!(r.output, "2.5"); // values[0] / values[1]
+        let r = tool
+            .execute(json!({"function": "percentage_change", "values": [75.0, 50.0]}))
+            .await
+            .unwrap();
+        assert!(r.success, "{:?}", r.error);
+        assert_eq!(r.output, "-33.33333333333333"); // from values[0] to values[1]
+        for f in ["pow", "modulo", "percentage_change", "round", "clamp"] {
+            let r = tool
+                .execute(json!({"function": f, "values": [1.0, 2.0, 3.0, 4.0]}))
+                .await
+                .unwrap();
+            assert!(!r.success, "{f} accepted 4 values");
+        }
+        let r = tool
+            .execute(json!({"function": "percentage_change", "values": [1.0, 2.0, 3.0]}))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.error.as_deref(),
+            Some("Expected exactly 2 value(s) in `values`, got 3")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_removed_a_b_x_shapes_are_rejected() {
+        let tool = CalculatorTool::new();
+        for args in [
+            json!({"function": "percentage_change", "a": 50.0, "b": 75.0}),
+            json!({"function": "divide", "a": 4.0, "b": 2.0}),
+            json!({"function": "sqrt", "x": 4.0}),
+        ] {
+            let r = tool.execute(args).await.unwrap();
+            assert!(!r.success);
+            assert_eq!(
+                r.error.as_deref(),
+                Some("Missing required parameter: values (array of numbers)")
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_clamp_within_range() {
         let tool = CalculatorTool::new();
         let result = tool
-            .execute(json!({"function": "clamp", "x": 5.0, "min_val": 1.0, "max_val": 10.0}))
+            .execute(json!({"function": "clamp", "values": [5.0, 1.0, 10.0]}))
             .await
             .unwrap();
         assert!(result.success);
@@ -901,7 +944,7 @@ mod tests {
     async fn test_clamp_below_min() {
         let tool = CalculatorTool::new();
         let result = tool
-            .execute(json!({"function": "clamp", "x": -5.0, "min_val": 0.0, "max_val": 10.0}))
+            .execute(json!({"function": "clamp", "values": [-5.0, 0.0, 10.0]}))
             .await
             .unwrap();
         assert!(result.success);
@@ -912,7 +955,7 @@ mod tests {
     async fn test_clamp_above_max() {
         let tool = CalculatorTool::new();
         let result = tool
-            .execute(json!({"function": "clamp", "x": 15.0, "min_val": 0.0, "max_val": 10.0}))
+            .execute(json!({"function": "clamp", "values": [15.0, 0.0, 10.0]}))
             .await
             .unwrap();
         assert!(result.success);
