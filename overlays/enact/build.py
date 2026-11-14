@@ -176,7 +176,8 @@ def project_session_tools(source):
             let agent = agent.lock().await;
             agent.tool_names().into_iter().map(str::to_string).collect()
         };
-        self.revalidate_admitted_session(&req.session_id, authorized.as_ref()).await?;
+        let scope = self.scoped_principal_id();
+        self.revalidate_admitted_session(&req.session_id, authorized.as_ref(), scope.as_deref()).await?;
         self.ensure_session_incarnation(&req.session_id, expected_generation).await?;
         to_result(SessionToolsResult { session_id: req.session_id, tools })
     }
@@ -362,7 +363,7 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
                      'crate::i18n::get_required_cli_string("cli-enact-agent-identity")')
     # Both the CLI and gateway call this updater. Compile-time env is mandatory
     # so a manual Cargo build of staged source cannot silently omit protection.
-    update_signature = "pub async fn run(target_version: Option<&str>, force: bool) -> Result<()> {"
+    update_signature = "pub async fn run(target_version: Option<&str>, force: bool, standard: bool) -> Result<()> {"
     replace_required(SOURCE / "src/commands/update.rs", update_signature,
                      update_signature + '\n    if !env!("ENACT_AGENT_BUILD").is_empty() {\n'
                      '        #[cfg(feature = "agent-runtime")]\n'
