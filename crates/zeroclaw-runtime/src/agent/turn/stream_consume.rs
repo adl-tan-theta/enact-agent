@@ -1326,6 +1326,34 @@ mod tests {
         );
     }
 
+    /// D-150: whitespace-only deltas (the space or newline a provider streams
+    /// on its own before a number or a table row) must reach response_text
+    /// verbatim through the think and marker strippers.
+    #[tokio::test]
+    async fn whitespace_only_deltas_reach_response_text() {
+        let provider = MarkerTestProvider::with_text_sequence(vec![
+            " nearly", " ", "60% of it", "\n", "| Month", " ", "1–2",
+        ]);
+
+        let outcome = consume_provider_streaming_response(
+            &provider,
+            &[ChatMessage::user("go")],
+            None,
+            "mock-model",
+            Some(0.0),
+            None,
+            None,
+            None,
+            false,
+            StreamReasoningMode::Status,
+            None,
+        )
+        .await
+        .expect("stream consume should succeed");
+
+        assert_eq!(outcome.response_text, " nearly 60% of it\n| Month 1–2");
+    }
+
     #[tokio::test]
     async fn strips_terminal_marker_same_chunk() {
         let provider = MarkerTestProvider::with_text_sequence(vec!["Summary<eom>"]);

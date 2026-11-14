@@ -9888,6 +9888,29 @@ mod tests {
         assert!(saw_final, "terminal sentinel must emit Final");
     }
 
+    /// D-150: a provider (MiniMax) streams the space before a number as its
+    /// own whitespace-only `content` delta. It must survive the SSE parse
+    /// verbatim, or the answer reads "nearly60%".
+    #[tokio::test]
+    async fn whitespace_only_content_delta_is_kept() {
+        let events = collect_stream_events(
+            "data: {\"choices\":[{\"delta\":{\"content\":\" nearly\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"content\":\" \",\"reasoning_content\":\"\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"content\":\"\\n\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"content\":\"60% of it\"}}]}\n\n\
+             data: [DONE]\n\n",
+        )
+        .await;
+        let text: String = events
+            .iter()
+            .filter_map(|event| match event {
+                Ok(StreamEvent::TextDelta(chunk)) => Some(chunk.delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, " nearly \n60% of it", "got: {events:?}");
+    }
+
     #[tokio::test]
     async fn eof_after_done_sentinel_emits_final() {
         let events = collect_stream_events(
