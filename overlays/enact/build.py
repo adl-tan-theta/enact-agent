@@ -79,6 +79,17 @@ def replace_required(path, old, new):
     path.write_text(text.replace(old, new))
 
 
+def replace_count_required(path, old, new, expected_count):
+    text = path.read_text()
+    actual_count = text.count(old)
+    if actual_count != expected_count:
+        raise RuntimeError(
+            f"Upstream overlay drift: expected {expected_count} {old!r} in {path}, "
+            f"found {actual_count}"
+        )
+    path.write_text(text.replace(old, new))
+
+
 def remove_required(path, old):
     """Remove an anchored block that must be there exactly once."""
     text = path.read_text()
@@ -285,17 +296,951 @@ def project_enact_external_tool_names(source, families, family_compilations):
 
 
 def project_enact_family_scope_filter(source):
-    """Drop a family when the scope filter drops every one of its members.
+    """Build scoped family actions only from members this principal may use.
 
-    Upstream drops the persistent memory tools by name, and `deliver_file`
-    in an ACP delivery turn. A family's own name is not one of its members'
-    names, so the filter would keep it: a memory-free run would still be
-    offered the `memory` family, whose actions call the very tools
-    `uses_memory = false` removes.
+    Family tools are initially built with all registered members. Rebuild
+    them at the scoped-registry boundary so caller restrictions and tools
+    requiring an unrestricted principal cannot be bypassed through an
+    aggregate action. Apply context filters to members too, so a memory-free
+    run cannot reach memory through the `memory` family.
     """
+    tool_api = source / "crates/zeroclaw-api/src/tool.rs"
     replace_required(
-        source / "crates/zeroclaw-runtime/src/tools/scoped.rs",
+        tool_api,
+        "    fn requires_unrestricted_principal(&self) -> bool {\n"
+        "        false\n"
+        "    }\n",
+        "    fn requires_unrestricted_principal(&self) -> bool {\n"
+        "        false\n"
+        "    }\n\n"
+        "    /// A composite tool may return its safe projection for a constrained\n"
+        "    /// principal. Called only when `requires_unrestricted_principal` is true.\n"
+        "    fn restricted_principal_variant(&self) -> Option<Box<dyn Tool>> {\n"
+        "        None\n"
+        "    }\n",
+    )
+
+    runtime_tools = source / "crates/zeroclaw-runtime/src/tools/mod.rs"
+    replace_required(
+        runtime_tools,
+        "    fn requires_unrestricted_principal(&self) -> bool {\n"
+        "        self.0.requires_unrestricted_principal()\n"
+        "    }\n",
+        "    fn requires_unrestricted_principal(&self) -> bool {\n"
+        "        self.0.requires_unrestricted_principal()\n"
+        "    }\n\n"
+        "    fn restricted_principal_variant(&self) -> Option<Box<dyn Tool>> {\n"
+        "        self.0.restricted_principal_variant()\n"
+        "    }\n",
+    )
+    replace_required(
+        runtime_tools,
+        "    fn requires_unrestricted_principal(&self) -> bool {\n"
+        "        self.inner.requires_unrestricted_principal()\n"
+        "    }\n",
+        "    fn requires_unrestricted_principal(&self) -> bool {\n"
+        "        self.inner.requires_unrestricted_principal()\n"
+        "    }\n\n"
+        "    fn restricted_principal_variant(&self) -> Option<Box<dyn Tool>> {\n"
+        "        self.inner.restricted_principal_variant()\n"
+        "    }\n",
+    )
+
+    delegate_tools = source / "crates/zeroclaw-runtime/src/tools/delegate.rs"
+    replace_required(
+        delegate_tools,
+        "fn current_tool_loop_session_key() -> Option<String> {\n",
+        "tokio::task_local! {\n"
+        "    static DELEGATE_CALLER_TOOL_SELECTOR: Vec<String>;\n"
+        "    static DELEGATE_CALLER_PARENT_TOOLS: Option<crate::tools::DelegateParentToolsHandle>;\n"
+        "    static DELEGATE_CALLER_MEMORY_FREE: bool;\n"
+        "}\n\n"
+        "pub(crate) fn current_delegate_caller_tool_selector() -> Option<Vec<String>> {\n"
+        "    DELEGATE_CALLER_TOOL_SELECTOR.try_with(Clone::clone).ok()\n"
+        "}\n\n"
+        "pub(crate) fn current_delegate_caller_parent_tools() -> Option<crate::tools::DelegateParentToolsHandle> {\n"
+        "    DELEGATE_CALLER_PARENT_TOOLS.try_with(Clone::clone).ok().flatten()\n"
+        "}\n\n"
+        "pub(crate) fn current_delegate_caller_memory_free() -> bool {\n"
+        "    DELEGATE_CALLER_MEMORY_FREE.try_with(|memory_free| *memory_free).unwrap_or(false)\n"
+        "}\n\n"
+        "async fn scope_delegate_caller_context<F>(\n"
+        "    selector: Option<Vec<String>>,\n"
+        "    parent_tools: Option<crate::tools::DelegateParentToolsHandle>,\n"
+        "    memory_free: bool,\n"
+        "    future: F,\n"
+        ") -> F::Output\n"
+        "where\n"
+        "    F: std::future::Future,\n"
+        "{\n"
+        "    DELEGATE_CALLER_MEMORY_FREE.scope(\n"
+        "        memory_free,\n"
+        "        DELEGATE_CALLER_PARENT_TOOLS.scope(parent_tools, async move {\n"
+        "            match selector {\n"
+        "                Some(selector) => DELEGATE_CALLER_TOOL_SELECTOR\n"
+        "                    .scope(selector, future)\n"
+        "                    .await,\n"
+        "                None => future.await,\n"
+        "            }\n"
+        "        }),\n"
+        "    ).await\n"
+        "}\n\n"
+        "pub(crate) fn scope_caller_tool(\n"
+        "    inner: Arc<dyn Tool>,\n"
+        "    selector: Option<Vec<String>>,\n"
+        "    parent_tools: Option<crate::tools::DelegateParentToolsHandle>,\n"
+        "    memory_free: bool,\n"
+        ") -> Arc<dyn Tool> {\n"
+        "    if selector.is_some() || memory_free {\n"
+        "        Arc::new(CallerScopeTool { inner, selector, parent_tools, memory_free })\n"
+        "    } else {\n"
+        "        inner\n"
+        "    }\n"
+        "}\n\n"
+        "struct CallerScopeTool {\n"
+        "    inner: Arc<dyn Tool>,\n"
+        "    selector: Option<Vec<String>>,\n"
+        "    parent_tools: Option<crate::tools::DelegateParentToolsHandle>,\n"
+        "    memory_free: bool,\n"
+        "}\n\n"
+        "impl ::zeroclaw_api::attribution::Attributable for CallerScopeTool {\n"
+        "    fn role(&self) -> ::zeroclaw_api::attribution::Role {\n"
+        "        self.inner.role()\n"
+        "    }\n\n"
+        "    fn alias(&self) -> &str {\n"
+        "        self.inner.alias()\n"
+        "    }\n"
+        "\n"
+        "    fn tool_provenance(&self) -> ::zeroclaw_api::attribution::ToolProvenance {\n"
+        "        self.inner.tool_provenance()\n"
+        "    }\n"
+        "}\n\n"
+        "#[async_trait]\n"
+        "impl Tool for CallerScopeTool {\n"
+        "    fn requires_unrestricted_principal(&self) -> bool {\n"
+        "        self.inner.as_ref().requires_unrestricted_principal()\n"
+        "    }\n\n"
+        "    fn restricted_principal_variant(&self) -> Option<Box<dyn Tool>> {\n"
+        "        self.inner.as_ref().restricted_principal_variant().map(|inner| {\n"
+        "            Box::new(Self {\n"
+        "                inner: Arc::from(inner),\n"
+        "                selector: self.selector.clone(),\n"
+        "                parent_tools: self.parent_tools.clone(),\n"
+        "                memory_free: self.memory_free,\n"
+        "            }) as Box<dyn Tool>\n"
+        "        })\n"
+        "    }\n\n"
+        "    fn name(&self) -> &str {\n"
+        "        self.inner.name()\n"
+        "    }\n\n"
+        "    fn description(&self) -> &str {\n"
+        "        self.inner.description()\n"
+        "    }\n\n"
+        "    fn parameters_schema(&self) -> serde_json::Value {\n"
+        "        self.inner.parameters_schema()\n"
+        "    }\n\n"
+        "    fn output_schema(&self) -> Option<serde_json::Value> {\n"
+        "        self.inner.output_schema()\n"
+        "    }\n\n"
+        "    fn param_domains(&self) -> Vec<(&'static str, zeroclaw_api::tool::OptionDomain)> {\n"
+        "        self.inner.param_domains()\n"
+        "    }\n\n"
+        "    fn invocation_triggers(&self) -> Vec<String> {\n"
+        "        self.inner.invocation_triggers()\n"
+        "    }\n\n"
+        "    fn spec(&self) -> zeroclaw_api::tool::ToolSpec {\n"
+        "        self.inner.spec()\n"
+        "    }\n\n"
+        "    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {\n"
+        "        scope_delegate_caller_context(\n"
+        "            self.selector.clone(),\n"
+        "            self.parent_tools.clone(),\n"
+        "            self.memory_free,\n"
+        "            self.inner.execute(args),\n"
+        "        ).await\n"
+        "    }\n\n"
+        "    async fn execute_with_context(\n"
+        "        &self,\n"
+        "        args: serde_json::Value,\n"
+        "        context: &zeroclaw_api::tool::ToolExecutionContext,\n"
+        "    ) -> anyhow::Result<ToolResult> {\n"
+        "        scope_delegate_caller_context(\n"
+        "            self.selector.clone(),\n"
+        "            self.parent_tools.clone(),\n"
+        "            self.memory_free,\n"
+        "            self.inner.execute_with_context(args, context),\n"
+        "        ).await\n"
+        "    }\n"
+        "}\n\n"
+        "fn current_tool_loop_session_key() -> Option<String> {\n",
+    )
+    replace_count_required(
+        delegate_tools,
+        "    fn requires_unrestricted_principal(&self) -> bool {\n"
+        "        self.inner.requires_unrestricted_principal()\n"
+        "    }\n",
+        "    fn requires_unrestricted_principal(&self) -> bool {\n"
+        "        self.inner.requires_unrestricted_principal()\n"
+        "    }\n\n"
+        "    fn restricted_principal_variant(&self) -> Option<Box<dyn Tool>> {\n"
+        "        self.inner.restricted_principal_variant()\n"
+        "    }\n",
+        2,
+    )
+
+    replace_required(
+        delegate_tools,
+        "        let target_workspace = config.agent_workspace_dir(agent_name);\n"
+        "        let skills = if construction == crate::composition::RegistryConstruction::NativeCompat {\n"
+        "            crate::skills::load_skills_for_agent_from_config(config, agent_name)\n"
+        "        } else {\n"
+        "            Vec::new()\n"
+        "        };\n\n"
+        "        let assembled = crate::tools::scoped::ScopedToolRegistry::assemble_prepared(\n",
+        "        let target_workspace = config.agent_workspace_dir(agent_name);\n"
+        "        let skills = if construction == crate::composition::RegistryConstruction::NativeCompat {\n"
+        "            crate::skills::load_skills_for_agent_from_config(config, agent_name)\n"
+        "        } else {\n"
+        "            Vec::new()\n"
+        "        };\n"
+        "        let caller_scope = current_delegate_caller_tool_selector();\n\n"
+        "        let assembled = crate::tools::scoped::ScopedToolRegistry::assemble_prepared(\n",
+    )
+    replace_required(
+        delegate_tools,
+        "                runtime,\n"
+        "                caller_allowed: None,\n"
+        "                connect_mcp: true,\n",
+        "                runtime,\n"
+        "                caller_allowed: caller_scope.as_deref(),\n"
+        "                connect_mcp: true,\n",
+    )
+    replace_required(
+        delegate_tools,
+        "                let bounded_default_config = Config::default();\n"
+        "                let bounded_security = Arc::new(SecurityPolicy::default());\n"
+        "                let assembled_bounded =\n",
+        "                let bounded_default_config = Config::default();\n"
+        "                let bounded_security = Arc::new(SecurityPolicy::default());\n"
+        "                let caller_scope = current_delegate_caller_tool_selector();\n"
+        "                let caller_memory_free = current_delegate_caller_memory_free();\n"
+        "                let assembled_bounded =\n",
+    )
+    replace_required(
+        delegate_tools,
+        "                            runtime: bounded_runtime,\n"
+        "                            caller_allowed: None,\n"
+        "                            connect_mcp: false,\n",
+        "                            runtime: bounded_runtime,\n"
+        "                            caller_allowed: caller_scope.as_deref(),\n"
+        "                            connect_mcp: false,\n",
+    )
+    replace_required(
+        delegate_tools,
+        "                            connect_peripherals: false,\n"
+        "                            exclude_memory: false,\n"
+        "                            acp_delivery: false,\n",
+        "                            connect_peripherals: false,\n"
+        "                            exclude_memory: caller_memory_free,\n"
+        "                            acp_delivery: false,\n",
+    )
+
+    replace_required(
+        delegate_tools,
+        "        if self.withholds_unrestricted_tools() {\n"
+        "            // Tools that cannot carry the caller's principal, and the skill\n"
+        "            // aliases and builders that would restore them, must not be\n"
+        "            // reintroduced by an independent target's factory.\n"
+        "            registry.retain(|tool| !tool.requires_unrestricted_principal());\n"
+        "        }\n",
+        "        registry.retain_projected(|tool| {\n"
+        "            if self.withholds_unrestricted_tools()\n"
+        "                && tool.requires_unrestricted_principal()\n"
+        "            {\n"
+        "                tool.restricted_principal_variant()\n"
+        "            } else {\n"
+        "                Some(tool)\n"
+        "            }\n"
+        "        });\n",
+    )
+
+    replace_required(
+        delegate_tools,
+        "                let inherited = snapshot\n"
+        "                    .into_iter()\n"
+        "                    .filter(|(tool, _)| tool.name() != Self::NAME)\n"
+        "                    .filter(|(tool, _)| {\n"
+        "                        !withhold_unrestricted || !tool.requires_unrestricted_principal()\n"
+        "                    })\n"
+        "                    .filter(|(tool, _)| self.security.is_tool_allowed(tool.name()))\n",
+        "                let inherited = snapshot\n"
+        "                    .into_iter()\n"
+        "                    .filter(|(tool, _)| tool.name() != Self::NAME)\n"
+        "                    .filter_map(|(tool, origin)| {\n"
+        "                        let tool = if withhold_unrestricted\n"
+        "                            && tool.requires_unrestricted_principal()\n"
+        "                        {\n"
+        "                            Arc::from(tool.restricted_principal_variant()?)\n"
+        "                        } else {\n"
+        "                            tool\n"
+        "                        };\n"
+        "                        Some((tool, origin))\n"
+        "                    })\n"
+        "                    .filter(|(tool, _)| self.security.is_tool_allowed(tool.name()))\n",
+    )
+
+    replace_required(
+        delegate_tools,
+        "        if self.withholds_unrestricted_tools() {\n"
+        "            sub_tools.retain(|tool| {\n"
+        "                tool.name() == Self::NAME || !tool.requires_unrestricted_principal()\n"
+        "            });\n"
+        "        }\n",
+        "        if self.withholds_unrestricted_tools() {\n"
+        "            sub_tools.retain_projected(|tool| {\n"
+        "                if tool.name() == Self::NAME\n"
+        "                    || !tool.requires_unrestricted_principal()\n"
+        "                {\n"
+        "                    Some(tool)\n"
+        "                } else {\n"
+        "                    tool.restricted_principal_variant()\n"
+        "                }\n"
+        "            });\n"
+        "        }\n",
+    )
+
+    skill_tools = source / "crates/zeroclaw-runtime/src/tools/skill_tool.rs"
+    replace_required(
+        skill_tools,
+        "    fn requires_unrestricted_principal(&self) -> bool {\n"
+        "        self.target_tool.requires_unrestricted_principal()\n"
+        "    }\n",
+        "    fn requires_unrestricted_principal(&self) -> bool {\n"
+        "        self.target_tool.requires_unrestricted_principal()\n"
+        "    }\n\n"
+        "    fn restricted_principal_variant(&self) -> Option<Box<dyn Tool>> {\n"
+        "        let target_tool = self.target_tool.restricted_principal_variant()?;\n"
+        "        let advertised_schema = Arc::new(narrow_schema(\n"
+        "            target_tool.parameters_schema(),\n"
+        "            &self.locked_args,\n"
+        "        ));\n"
+        "        Some(Box::new(Self {\n"
+        "            tool_name: self.tool_name.clone(),\n"
+        "            tool_description: self.tool_description.clone(),\n"
+        "            target_tool: Arc::from(target_tool),\n"
+        "            locked_args: self.locked_args.clone(),\n"
+        "            advertised_schema,\n"
+        "        }))\n"
+        "    }\n",
+    )
+
+    replace_required(
+        skill_tools,
+        "    #[test]\n"
+        "    fn merge_locked_args_locks_win_and_passthrough() {\n",
+        "    struct UnrestrictedMockBuiltinTool(MockBuiltinTool);\n"
+        "\n"
+        "    impl ::zeroclaw_api::attribution::Attributable for UnrestrictedMockBuiltinTool {\n"
+        "        fn role(&self) -> ::zeroclaw_api::attribution::Role {\n"
+        "            ::zeroclaw_api::attribution::Role::Tool(\n"
+        "                ::zeroclaw_api::attribution::ToolKind::Plugin,\n"
+        "            )\n"
+        "        }\n"
+        "\n"
+        "        fn alias(&self) -> &str {\n"
+        "            ::zeroclaw_api::attribution::Attributable::alias(&self.0)\n"
+        "        }\n"
+        "    }\n"
+        "\n"
+        "    #[async_trait]\n"
+        "    impl Tool for UnrestrictedMockBuiltinTool {\n"
+        "        fn name(&self) -> &str {\n"
+        "            self.0.name()\n"
+        "        }\n"
+        "\n"
+        "        fn description(&self) -> &str {\n"
+        "            self.0.description()\n"
+        "        }\n"
+        "\n"
+        "        fn parameters_schema(&self) -> serde_json::Value {\n"
+        "            self.0.parameters_schema()\n"
+        "        }\n"
+        "\n"
+        "        fn requires_unrestricted_principal(&self) -> bool {\n"
+        "            true\n"
+        "        }\n"
+        "\n"
+        "        async fn execute(\n"
+        "            &self,\n"
+        "            args: serde_json::Value,\n"
+        "        ) -> anyhow::Result<ToolResult> {\n"
+        "            self.0.execute(args).await\n"
+        "        }\n"
+        "    }\n"
+        "\n"
+        "    #[tokio::test]\n"
+        "    async fn restricted_skill_family_preserves_alias_and_locked_action() {\n"
+        "        let family = crate::tools::families::family_by_name(\"model\").unwrap();\n"
+        "        let target = crate::tools::families::FamilyTool::build(\n"
+        "            family,\n"
+        "            vec![\n"
+        "                Arc::new(EchoArgsTool {\n"
+        "                    name: \"model_switch\".into(),\n"
+        "                }) as Arc<dyn Tool>,\n"
+        "                Arc::new(UnrestrictedMockBuiltinTool(MockBuiltinTool::new(\n"
+        "                    \"model_routing_config\",\n"
+        "                ))),\n"
+        "            ],\n"
+        "        )\n"
+        "        .unwrap();\n"
+        "        let mut locked = HashMap::new();\n"
+        "        locked.insert(\"action\".to_string(), \"model_switch_get\".to_string());\n"
+        "        let skill = elevation_skill_tool(\"builtin\", \"model\", locked.clone());\n"
+        "        let wrapper = SkillBuiltinTool::new(\"ops\", &skill, Arc::new(target), locked);\n"
+        "        let safe = wrapper\n"
+        "            .restricted_principal_variant()\n"
+        "            .expect(\"safe family projection should preserve the skill wrapper\");\n"
+        "\n"
+        "        assert_eq!(safe.name(), \"ops__delegate\");\n"
+        "        assert!(safe.parameters_schema()[\"properties\"][\"action\"].is_null());\n"
+        "        let result = safe\n"
+        "            .execute(serde_json::json!({\"action\": \"model_switch_set\"}))\n"
+        "            .await\n"
+        "            .unwrap();\n"
+        "        let forwarded: serde_json::Value = serde_json::from_str(&result.output).unwrap();\n"
+        "        assert_eq!(forwarded[\"action\"], \"get\");\n"
+        "    }\n\n"
+        "    #[test]\n"
+        "    fn merge_locked_args_locks_win_and_passthrough() {\n",
+    )
+
+    agent = source / "crates/zeroclaw-runtime/src/agent/agent.rs"
+    replace_required(
+        agent,
+        "    pub(crate) fn disable_principal_unaware_nested_tools(&mut self) {\n"
+        "        self.tools\n"
+        "            .retain(|tool| !tool.requires_unrestricted_principal());\n"
+        "        self.refresh_system_prompt();\n"
+        "    }\n",
+        "    pub(crate) fn disable_principal_unaware_nested_tools(&mut self) {\n"
+        "        let mut changed = false;\n"
+        "        self.tools.retain_projected(|tool| {\n"
+        "            if tool.requires_unrestricted_principal() {\n"
+        "                changed = true;\n"
+        "                tool.restricted_principal_variant()\n"
+        "            } else {\n"
+        "                Some(tool)\n"
+        "            }\n"
+        "        });\n"
+        "        if changed {\n"
+        "            self.refresh_system_prompt();\n"
+        "        }\n"
+        "    }\n",
+    )
+
+    replace_required(
+        agent,
+        "        if principal_allowed_tools.is_some() {\n"
+        "            registry.retain(|tool| !tool.requires_unrestricted_principal());\n"
+        "        }\n",
+        "        if principal_allowed_tools.is_some() {\n"
+        "            registry.retain_projected(|tool| {\n"
+        "                if tool.requires_unrestricted_principal() {\n"
+        "                    tool.restricted_principal_variant()\n"
+        "                } else {\n"
+        "                    Some(tool)\n"
+        "                }\n"
+        "            });\n"
+        "        }\n",
+    )
+
+    tool_search = source / "crates/zeroclaw-tools/src/tool_search.rs"
+    replace_required(
+        tool_search,
+        "impl ToolAccessPolicy {\n",
+        "const MCP_CAPABILITY_TOOLS: &[&str] = &[\"mcp_resources\", \"mcp_prompts\"];\n\n"
+        "fn selector_contains_tool(selector: &[String], name: &str) -> bool {\n"
+        "    selector.iter().any(|selected| {\n"
+        "        selected == name\n"
+        "            || (selected == \"mcp\" && MCP_CAPABILITY_TOOLS.contains(&name))\n"
+        "    })\n"
+        "}\n\n"
+        "impl ToolAccessPolicy {\n",
+    )
+    replace_required(
+        tool_search,
+        "    pub fn is_tool_allowed(&self, name: &str) -> bool {\n"
+        "        // Deny-list always wins.\n"
+        "        let in_deny = self\n"
+        "            .denied\n"
+        "            .as_ref()\n"
+        "            .is_some_and(|list| list.iter().any(|t| t == name));\n"
+        "        if in_deny {\n"
+        "            return false;\n"
+        "        }\n\n"
+        "        // Risk-profile gate: MCP `<server>__<tool>` names are auto-admitted\n"
+        "        // when the list is non-empty. An explicit empty list (`Some(vec![])`)\n"
+        "        // still means \"deny everything\".\n"
+        "        let risk_ok = match self.allowed.as_ref() {\n"
+        "            None => true,\n"
+        "            Some(list) if list.is_empty() => false,\n"
+        "            Some(list) => list.iter().any(|t| t == name) || name.contains(\"__\"),\n"
+        "        };\n"
+        "        if !risk_ok {\n"
+        "            return false;\n"
+        "        }\n\n"
+        "        match self.caller_allowed.as_ref() {\n"
+        "            None => true,\n"
+        "            Some(list) => list.iter().any(|t| t == name),\n"
+        "        }\n"
+        "    }\n",
+        "    pub fn is_tool_allowed(&self, name: &str) -> bool {\n"
+        "        // Deny-list always wins, including a denied canonical family.\n"
+        "        if self\n"
+        "            .denied\n"
+        "            .as_ref()\n"
+        "            .is_some_and(|list| selector_contains_tool(list, name))\n"
+        "        {\n"
+        "            return false;\n"
+        "        }\n\n"
+        "        // Risk-profile gate: MCP `<server>__<tool>` names are auto-admitted\n"
+        "        // when the list is non-empty. An explicit empty list (`Some(vec![])`)\n"
+        "        // still means \"deny everything\".\n"
+        "        let risk_ok = match self.allowed.as_ref() {\n"
+        "            None => true,\n"
+        "            Some(list) if list.is_empty() => false,\n"
+        "            Some(list) => selector_contains_tool(list, name) || name.contains(\"__\"),\n"
+        "        };\n"
+        "        if !risk_ok {\n"
+        "            return false;\n"
+        "        }\n\n"
+        "        match self.caller_allowed.as_ref() {\n"
+        "            None => true,\n"
+        "            Some(list) => selector_contains_tool(list, name),\n"
+        "        }\n"
+        "    }\n",
+    )
+    replace_required(
+        tool_search,
+        "    #[tokio::test]\n"
+        "    async fn policy_filters_keyword_search_results() {\n",
+        "    #[test]\n"
+        "    fn canonical_mcp_selector_admits_capabilities_and_honors_family_denial() {\n"
+        "        let selected = ToolAccessPolicy::from_security(\n"
+        "            Some(&[\"mcp\".to_string()]),\n"
+        "            None,\n"
+        "            Some(&[\"mcp\".to_string()]),\n"
+        "        )\n"
+        "        .expect(\"canonical MCP selection creates a policy\");\n"
+        "        assert!(selected.is_tool_allowed(\"mcp_resources\"));\n"
+        "        assert!(selected.is_tool_allowed(\"mcp_prompts\"));\n"
+        "        assert!(!selected.is_tool_allowed(\"github__search\"));\n"
+        "\n"
+        "        let denied = ToolAccessPolicy::from_security(\n"
+        "            None,\n"
+        "            Some(&[\"mcp\".to_string()]),\n"
+        "            None,\n"
+        "        )\n"
+        "        .expect(\"canonical MCP denial creates a policy\");\n"
+        "        assert!(!denied.is_tool_allowed(\"mcp_resources\"));\n"
+        "        assert!(!denied.is_tool_allowed(\"mcp_prompts\"));\n"
+        "    }\n\n"
+        "    #[tokio::test]\n"
+        "    async fn policy_filters_keyword_search_results() {\n",
+    )
+
+    scoped = source / "crates/zeroclaw-runtime/src/tools/scoped.rs"
+    replace_required(
+        scoped,
+        "    pub(crate) fn retain(&mut self, f: impl FnMut(&Box<dyn Tool>) -> bool) {\n"
+        "        self.0.retain(f);\n"
+        "        if let Some(parent) = &self.4 {\n"
+        "            parent.write().retain(|tool| {\n"
+        "                !self.3.origins.is_supplied(tool) || self.3.retains_source(&self.0, tool)\n"
+        "            });\n"
+        "        }\n"
+        "        self.3.retain(&self.0);\n"
+        "        self.refresh_builtin_schemas();\n"
+        "    }\n",
+        "    pub(crate) fn retain(&mut self, f: impl FnMut(&Box<dyn Tool>) -> bool) {\n"
+        "        self.0.retain(f);\n"
+        "        if let Some(parent) = &self.4 {\n"
+        "            parent.write().retain(|tool| {\n"
+        "                !self.3.origins.is_supplied(tool) || self.3.retains_source(&self.0, tool)\n"
+        "            });\n"
+        "        }\n"
+        "        self.3.retain(&self.0);\n"
+        "        self.refresh_builtin_schemas();\n"
+        "    }\n\n"
+        "    pub(crate) fn retain_projected(\n"
+        "        &mut self,\n"
+        "        mut project: impl FnMut(Box<dyn Tool>) -> Option<Box<dyn Tool>>,\n"
+        "    ) {\n"
+        "        self.0 = std::mem::take(&mut self.0)\n"
+        "            .into_iter()\n"
+        "            .filter_map(|tool| project(tool))\n"
+        "            .collect();\n"
+        "        if let Some(parent) = &self.4 {\n"
+        "            parent.write().retain(|tool| {\n"
+        "                !self.3.origins.is_supplied(tool) || self.3.retains_source(&self.0, tool)\n"
+        "            });\n"
+        "        }\n"
+        "        self.3.retain(&self.0);\n"
+        "        self.refresh_builtin_schemas();\n"
+        "    }\n",
+    )
+    replace_required(
+        scoped,
         "fn tool_allowed_in_context(name: &str, exclude_memory: bool, acp_delivery: bool) -> bool {\n"
+        "    (!exclude_memory || !zeroclaw_tools::MEMORY_TOOL_NAMES.contains(&name))\n"
+        '        && (acp_delivery || name != "deliver_file")\n'
+        "}\n",
+        "fn tool_allowed_in_context(name: &str, exclude_memory: bool, acp_delivery: bool) -> bool {\n"
+        "    // A consolidated family stands for its members, so it is offered\n"
+        "    // only while at least one of them is. The members are dropped by\n"
+        "    // name, and a family's own name is not one of theirs, so without\n"
+        "    // this a memory-free run would still be offered the `memory`\n"
+        "    // family — whose actions call the very tools `uses_memory =\n"
+        "    // false` removes.\n"
+        '    if crate::tools::delegate::current_delegate_caller_memory_free() && matches!(name, "sop_execute" | "sop_advance" | "sop_approve" | "cron_run") {\n'
+        "        return false;\n"
+        "    }\n"
+        "    if let Some(family) = crate::tools::families::family_by_name(name) {\n"
+        "        return family\n"
+        "            .members\n"
+        "            .iter()\n"
+        "            .any(|member| tool_allowed_in_context(member, exclude_memory, acp_delivery));\n"
+        "    }\n"
+        "    (!exclude_memory || !zeroclaw_tools::MEMORY_TOOL_NAMES.contains(&name))\n"
+        '        && (acp_delivery || name != "deliver_file")\n'
+        "}\n",
+    )
+
+    supplied_family_helpers = '''\
+fn enact_family_member_allowed(
+    tool: &dyn Tool,
+    family: &crate::tools::families::Family,
+    security: &SecurityPolicy,
+    caller_allowed: Option<&[String]>,
+    exclude_memory: bool,
+    acp_delivery: bool,
+) -> bool {
+    !security.is_tool_excluded(family.name)
+        && !security.is_tool_excluded(tool.name())
+        && (security.is_tool_allowed(tool.name()) || security.is_tool_allowed(family.name))
+        && caller_allowed.is_none_or(|allowed| {
+            allowed
+                .iter()
+                .any(|name| name == family.name || name == tool.name())
+        })
+        && (caller_allowed.is_none() || !tool.requires_unrestricted_principal())
+        && tool_allowed_in_context(tool.name(), exclude_memory, acp_delivery)
+}
+
+fn enact_project_supplied_families(
+    source_tools: &[Arc<dyn Tool>],
+    selected_families: &HashSet<String>,
+    security: &SecurityPolicy,
+    caller_allowed: Option<&[String]>,
+    exclude_memory: bool,
+    acp_delivery: bool,
+) -> Vec<Arc<dyn Tool>> {
+    crate::tools::families::FAMILIES
+        .iter()
+        .filter(|family| selected_families.contains(family.name))
+        .filter_map(|family| {
+            let members = source_tools
+                .iter()
+                .filter(|tool| family.members.contains(&tool.name()))
+                .filter(|tool| {
+                    enact_family_member_allowed(
+                        tool.as_ref(),
+                        family,
+                        security,
+                        caller_allowed,
+                        exclude_memory,
+                        acp_delivery,
+                    )
+                })
+                .cloned()
+                .collect();
+            crate::tools::families::FamilyTool::build(family, members)
+                .map(|family_tool| Arc::new(family_tool) as Arc<dyn Tool>)
+        })
+        .collect()
+}
+
+fn enact_assemble_supplied_only(
+    spec: ScopedAssembly<'_>,
+    supplied_tail: std::ops::Range<usize>,
+) -> ScopedAssembled {
+    let security = spec.security.as_ref();
+    let caller_allowed = spec.caller_allowed;
+    let exclude_memory = spec.exclude_memory;
+    let acp_delivery = spec.acp_delivery;
+    let mut built = spec.built;
+
+    // A bounded construction gets a run-local parent view. Policy projection and
+    // family rebuilding must never narrow a handle shared with its caller.
+    built.delegate_handle = built.delegate_handle.as_ref().map(|parent| {
+        if caller_allowed.is_some() || exclude_memory || acp_delivery {
+            Arc::new(parking_lot::RwLock::new(parent.read().clone()))
+        } else {
+            Arc::clone(parent)
+        }
+    });
+
+    let mut parent_family_names = HashSet::new();
+    let mut parent_raw_tools = Vec::new();
+    if let Some(parent) = built.delegate_handle.as_ref() {
+        for tool in parent.read().iter() {
+            if crate::tools::families::family_by_name(tool.name()).is_some() {
+                parent_family_names.insert(tool.name().to_string());
+            } else if crate::tools::families::family_of(tool.name()).is_none() {
+                parent_raw_tools.push(Arc::clone(tool));
+            }
+        }
+        let projected = enact_project_supplied_families(
+            &parent_raw_tools,
+            &parent_family_names,
+            security,
+            caller_allowed,
+            exclude_memory,
+            acp_delivery,
+        );
+        let mut parent_tools = parent.write();
+        parent_tools.retain(|tool| {
+            if crate::tools::families::family_by_name(tool.name()).is_some() {
+                return false;
+            }
+            if let Some(family) = crate::tools::families::family_of(tool.name()) {
+                return enact_family_member_allowed(
+                    tool.as_ref(),
+                    family,
+                    security,
+                    caller_allowed,
+                    exclude_memory,
+                    acp_delivery,
+                );
+            }
+            security.is_tool_allowed(tool.name())
+                && caller_allowed.is_none_or(|allowed| allowed.iter().any(|name| name == tool.name()))
+                && tool_allowed_in_context(tool.name(), exclude_memory, acp_delivery)
+        });
+        {
+            let parent_handle = Arc::clone(parent);
+            for tool in parent_tools.iter_mut() {
+                if tool.name() == crate::tools::DelegateTool::NAME {
+                    *tool = crate::tools::delegate::scope_caller_tool(
+                        Arc::clone(tool),
+                        caller_allowed.map(<[String]>::to_vec),
+                        Some(Arc::clone(&parent_handle)),
+                        exclude_memory,
+                    );
+                }
+            }
+        }
+        for family_tool in projected {
+            if !parent_tools
+                .iter()
+                .any(|tool| tool.name() == family_tool.name())
+            {
+                parent_tools.push(family_tool);
+            }
+        }
+    }
+
+    let mut registry = BuildRegistry {
+        entries: Vec::new(),
+    };
+    let mut selected_families = HashSet::new();
+    let mut raw_tools = Vec::new();
+    for (index, tool) in built.tools.into_iter().enumerate() {
+        let (actual, witness, inherited_supplied) = built.native_memory.take(tool.as_ref());
+        let mut actual = actual.unwrap_or_else(|| Arc::from(tool));
+        if crate::tools::families::family_by_name(actual.name()).is_some() {
+            selected_families.insert(actual.name().to_string());
+            continue;
+        }
+        if actual.name() == crate::tools::DelegateTool::NAME {
+            actual = crate::tools::delegate::scope_caller_tool(
+                actual,
+                caller_allowed.map(<[String]>::to_vec),
+                built.delegate_handle.clone(),
+                exclude_memory,
+            );
+        }
+        raw_tools.push(Arc::clone(&actual));
+        let id = registry.push(BuildSlot::Ready(actual));
+        registry.entries[id.0].origin = if supplied_tail.contains(&index) || inherited_supplied {
+            EntryOrigin::Supplied
+        } else {
+            EntryOrigin::Native
+        };
+        registry.entries[id.0].native_memory = witness;
+    }
+
+    registry.retain(|tool| {
+        if let Some(family) = crate::tools::families::family_of(tool.name()) {
+            return match tool {
+                BuildSlot::Ready(actual) => enact_family_member_allowed(
+                    actual.as_ref(),
+                    family,
+                    security,
+                    caller_allowed,
+                    exclude_memory,
+                    acp_delivery,
+                ),
+                _ => false,
+            };
+        }
+        security.is_tool_allowed(tool.name())
+            && caller_allowed.is_none_or(|allowed| allowed.iter().any(|name| name == tool.name()))
+            && tool_allowed_in_context(tool.name(), exclude_memory, acp_delivery)
+    });
+
+    let projected_families = enact_project_supplied_families(
+        &raw_tools,
+        &selected_families,
+        security,
+        caller_allowed,
+        exclude_memory,
+        acp_delivery,
+    );
+    for family_tool in &projected_families {
+        registry.push(BuildSlot::Ready(Arc::clone(family_tool)));
+    }
+    let tools = registry.seal(
+        None,
+        &mut built.native_memory,
+        built.delegate_handle.as_ref(),
+    );
+    if let Some(parent) = built.delegate_handle.as_ref() {
+        let included: HashSet<&str> = tools.iter().map(|tool| tool.name()).collect();
+        let mut parent = parent.write();
+        for family_tool in projected_families {
+            if included.contains(family_tool.name())
+                && !parent.iter().any(|tool| tool.name() == family_tool.name())
+            {
+                parent.push(family_tool);
+            }
+        }
+    }
+    ScopedAssembled {
+        registry: ScopedToolRegistry(
+            tools,
+            None,
+            RegistryConstruction::SuppliedOnly,
+            built.native_memory,
+            built.delegate_handle.clone(),
+            built.session_memory,
+        ),
+        delegate_handle: built.delegate_handle,
+        ask_user_handle: built.ask_user_handle,
+        reaction_handle: built.reaction_handle,
+        poll_handle: built.poll_handle,
+        escalate_handle: built.escalate_handle,
+        channel_room_handle: built.channel_room_handle,
+        activated_handle: None,
+        tool_search_handle: None,
+        mcp_tool_names: HashSet::new(),
+        deferred_section: String::new(),
+        pinned_section: String::new(),
+        pinned_blocks: Vec::new(),
+    }
+}
+
+'''
+    replace_required(
+        scoped,
+        "fn tool_allowed_in_context(name: &str, exclude_memory: bool, acp_delivery: bool) -> bool {\n",
+        supplied_family_helpers
+        + "fn tool_allowed_in_context(name: &str, exclude_memory: bool, acp_delivery: bool) -> bool {\n",
+    )
+
+    replace_required(
+        scoped,
+        "        if construction == RegistryConstruction::SuppliedOnly {\n"
+        "            let mut built = spec.built;\n"
+        "            // The delegate's parent view gets the same memory/delivery context\n"
+        "            // filter as the registry, as it does in native compatibility mode.\n"
+        "            if let Some(parent) = built.delegate_handle.as_ref() {\n"
+        "                parent.write().retain(|tool| {\n"
+        "                    tool_allowed_in_context(tool.name(), spec.exclude_memory, spec.acp_delivery)\n"
+        "                });\n"
+        "            }\n"
+        "            let mut registry = BuildRegistry {\n"
+        "                entries: Vec::new(),\n"
+        "            };\n"
+        "            for (index, tool) in built.tools.into_iter().enumerate() {\n"
+        "                let (actual, witness, inherited_supplied) = built.native_memory.take(tool.as_ref());\n"
+        "                let id = registry.push(BuildSlot::Ready(actual.unwrap_or_else(|| Arc::from(tool))));\n"
+        "                registry.entries[id.0].origin =\n"
+        "                    if supplied_tail.contains(&index) || inherited_supplied {\n"
+        "                        EntryOrigin::Supplied\n"
+        "                    } else {\n"
+        "                        EntryOrigin::Native\n"
+        "                    };\n"
+        "                registry.entries[id.0].native_memory = witness;\n"
+        "            }\n"
+        "            registry.retain(|tool| {\n"
+        "                spec.security.is_tool_allowed(tool.name())\n"
+        "                    && spec\n"
+        "                        .caller_allowed\n"
+        "                        .is_none_or(|allowed| allowed.iter().any(|name| name == tool.name()))\n"
+        "                    && tool_allowed_in_context(tool.name(), spec.exclude_memory, spec.acp_delivery)\n"
+        "            });\n"
+        "            let tools = registry.seal(\n"
+        "                None,\n"
+        "                &mut built.native_memory,\n"
+        "                built.delegate_handle.as_ref(),\n"
+        "            );\n"
+        "            return ScopedAssembled {\n"
+        "                registry: Self(\n"
+        "                    tools,\n"
+        "                    None,\n"
+        "                    construction,\n"
+        "                    built.native_memory,\n"
+        "                    built.delegate_handle.clone(),\n"
+        "                    built.session_memory,\n"
+        "                ),\n"
+        "                delegate_handle: built.delegate_handle,\n"
+        "                ask_user_handle: built.ask_user_handle,\n"
+        "                reaction_handle: built.reaction_handle,\n"
+        "                poll_handle: built.poll_handle,\n"
+        "                escalate_handle: built.escalate_handle,\n"
+        "                channel_room_handle: built.channel_room_handle,\n"
+        "                activated_handle: None,\n"
+        "                tool_search_handle: None,\n"
+        "                mcp_tool_names: HashSet::new(),\n"
+        "                deferred_section: String::new(),\n"
+        "                pinned_section: String::new(),\n"
+        "                pinned_blocks: Vec::new(),\n"
+        "            };\n"
+        "        }\n",
+        "        if construction == RegistryConstruction::SuppliedOnly {\n"
+        "            return enact_assemble_supplied_only(spec, supplied_tail);\n"
+        "        }\n",
+    )
+
+    replace_required(
+        scoped,
+        "fn tool_allowed_in_context(name: &str, exclude_memory: bool, acp_delivery: bool) -> bool {\n"
+        "    // A consolidated family stands for its members, so it is offered\n"
+        "    // only while at least one of them is. The members are dropped by\n"
+        "    // name, and a family's own name is not one of theirs, so without\n"
+        "    // this a memory-free run would still be offered the `memory`\n"
+        "    // family — whose actions call the very tools `uses_memory =\n"
+        "    // false` removes.\n"
+        '    if crate::tools::delegate::current_delegate_caller_memory_free() && matches!(name, "sop_execute" | "sop_advance" | "sop_approve" | "cron_run") {\n'
+        "        return false;\n"
+        "    }\n"
+        "    if let Some(family) = crate::tools::families::family_by_name(name) {\n"
+        "        return family\n"
+        "            .members\n"
+        "            .iter()\n"
+        "            .any(|member| tool_allowed_in_context(member, exclude_memory, acp_delivery));\n"
+        "    }\n"
         "    (!exclude_memory || !zeroclaw_tools::MEMORY_TOOL_NAMES.contains(&name))\n"
         '        && (acp_delivery || name != "deliver_file")\n'
         "}\n",
@@ -312,10 +1257,572 @@ def project_enact_family_scope_filter(source):
         "            .iter()\n"
         "            .any(|member| tool_allowed_in_context(member, exclude_memory, acp_delivery));\n"
         "    }\n"
+        '    if crate::tools::delegate::current_delegate_caller_memory_free() && matches!(name, "sop_execute" | "sop_advance" | "sop_approve" | "cron_run") {\n'
+        "        return false;\n"
+        "    }\n"
         "    (!exclude_memory || !zeroclaw_tools::MEMORY_TOOL_NAMES.contains(&name))\n"
         '        && (acp_delivery || name != "deliver_file")\n'
         "}\n",
     )
+
+    replace_required(
+        scoped,
+        "    #[tokio::test]\n"
+        "    async fn assemble_threads_caller_allowed_narrowing() {\n",
+        "    struct MemoryFreeDelegateProbe(Arc<parking_lot::Mutex<Option<bool>>>);\n"
+        "    zeroclaw_api::mock_tool_attribution!(MemoryFreeDelegateProbe);\n\n"
+        "    #[async_trait]\n"
+        "    impl Tool for MemoryFreeDelegateProbe {\n"
+        "        fn name(&self) -> &str { \"delegate\" }\n"
+        "        fn description(&self) -> &str { \"memory-free probe\" }\n"
+        "        fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({}) }\n"
+        "        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolResult> {\n"
+        "            *self.0.lock() = Some(crate::tools::delegate::current_delegate_caller_memory_free());\n"
+        "            Ok(ToolResult { success: true, output: ToolOutput::default(), error: None })\n"
+        "        }\n"
+        "    }\n\n"
+        "    struct CallerSelectorProbe(\n"
+        "        Arc<parking_lot::Mutex<Option<Vec<String>>>>,\n"
+        "        Arc<parking_lot::Mutex<Option<crate::tools::DelegateParentToolsHandle>>>,\n"
+        "    );\n"
+        "    zeroclaw_api::mock_tool_attribution!(CallerSelectorProbe);\n\n"
+        "    #[async_trait]\n"
+        "    impl Tool for CallerSelectorProbe {\n"
+        "        fn name(&self) -> &str { \"delegate\" }\n"
+        "        fn description(&self) -> &str { \"selector probe\" }\n"
+        "        fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({}) }\n"
+        "        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolResult> {\n"
+        "            *self.0.lock() = crate::tools::delegate::current_delegate_caller_tool_selector();\n"
+        "            *self.1.lock() = crate::tools::delegate::current_delegate_caller_parent_tools();\n"
+        "            Ok(ToolResult { success: true, output: ToolOutput::default(), error: None })\n"
+        "        }\n"
+        "    }\n\n"
+        "    #[tokio::test]\n"
+        "    async fn caller_scope_wraps_delegate_execution() {\n"
+        "        let selected = Arc::new(parking_lot::Mutex::new(None));\n"
+        "        let parent_seen = Arc::new(parking_lot::Mutex::new(None));\n"
+        "        let probe: Arc<dyn Tool> = Arc::new(CallerSelectorProbe(\n"
+        "            Arc::clone(&selected), Arc::clone(&parent_seen),\n"
+        "        ));\n"
+        "        let members: Vec<Arc<dyn Tool>> = [\n"
+        "            \"sessions_current\", \"sessions_list\", \"sessions_history\", \"sessions_send\",\n"
+        "        ].into_iter().map(|name| Arc::new(MockTool(name)) as Arc<dyn Tool>).collect();\n"
+        "        let family = crate::tools::families::family_by_name(\"sessions\").unwrap();\n"
+        "        let sessions = crate::tools::families::FamilyTool::build(family, members.clone()).unwrap();\n"
+        "        let mut built = built_with(vec![\n"
+        "            Box::new(tools::ArcToolRef(Arc::clone(&probe))), Box::new(sessions),\n"
+        "        ]);\n"
+        "        built.unfiltered_tool_arcs = std::iter::once(Arc::clone(&probe))\n"
+        "            .chain(members).collect();\n"
+        "        let parent: Arc<parking_lot::RwLock<Vec<Arc<dyn Tool>>>> =\n"
+        "            Arc::new(parking_lot::RwLock::new(Vec::new()));\n"
+        "        built.delegate_handle = Some(Arc::clone(&parent));\n"
+        "        let allowed = vec![\"delegate\".to_string(), \"sessions\".to_string()];\n"
+        "        let config = Config::default();\n"
+        "        let security = Arc::new(SecurityPolicy::default());\n"
+        "        let assembled = ScopedToolRegistry::assemble(ScopedAssembly {\n"
+        "            config: &config, agent_alias: \"default\", security: &security, built,\n"
+        "            skills: &[], runtime: Arc::new(crate::platform::NativeRuntime::new()),\n"
+        "            caller_allowed: Some(&allowed), connect_mcp: false, connect_peripherals: false,\n"
+        "            exclude_memory: false, acp_delivery: true, list_deferred_mcp_specs: false,\n"
+        "            emit_assembly_logs: false, mcp_registry: None,\n"
+        "        }).await;\n"
+        "        let delegate = assembled.registry.0.iter().find(|tool| tool.name() == \"delegate\")\n"
+        "            .expect(\"delegate remains admitted\");\n"
+        "        delegate.execute(serde_json::json!({})).await.expect(\"probe executes\");\n"
+        "        assert_eq!(*selected.lock(), Some(allowed));\n"
+        "        assert!(assembled.registry.iter().any(|tool| tool.name() == \"sessions\"));\n"
+        "        let run_parent = parent_seen.lock().clone().expect(\"run parent view is scoped\");\n"
+        "        assert!(!Arc::ptr_eq(&parent, &run_parent), \"run parent view is isolated\");\n"
+        "        assert!(parent.read().is_empty(), \"selector-scoped family must not persist\");\n"
+        "    }\n\n"
+        "    #[tokio::test]\n"
+        "    async fn supplied_only_projects_families_and_scopes_delegate() {\n"
+        "        let selected = Arc::new(parking_lot::Mutex::new(None));\n"
+        "        let parent_seen = Arc::new(parking_lot::Mutex::new(None));\n"
+        "        let probe: Arc<dyn Tool> = Arc::new(CallerSelectorProbe(\n"
+        "            Arc::clone(&selected), Arc::clone(&parent_seen),\n"
+        "        ));\n"
+        "        let members: Vec<Arc<dyn Tool>> = [\n"
+        "            \"sessions_current\", \"sessions_list\", \"sessions_history\", \"sessions_send\",\n"
+        "        ].into_iter().map(|name| Arc::new(MockTool(name)) as Arc<dyn Tool>).collect();\n"
+        "        let family = crate::tools::families::family_by_name(\"sessions\").unwrap();\n"
+        "        let sessions: Arc<dyn Tool> = Arc::new(\n"
+        "            crate::tools::families::FamilyTool::build(family, members.clone()).unwrap(),\n"
+        "        );\n"
+        "        let mut supplied = vec![Box::new(tools::ArcToolRef(Arc::clone(&probe))) as Box<dyn Tool>];\n"
+        "        supplied.extend(members.iter().cloned().map(|tool| {\n"
+        "            Box::new(tools::ArcToolRef(tool)) as Box<dyn Tool>\n"
+        "        }));\n"
+        "        supplied.push(Box::new(tools::ArcToolRef(Arc::clone(&sessions))));\n"
+        "        let mut built = built_with(supplied);\n"
+        "        built.unfiltered_tool_arcs = std::iter::once(Arc::clone(&probe))\n"
+        "            .chain(members.iter().cloned()).collect();\n"
+        "        let original_parent: Arc<parking_lot::RwLock<Vec<Arc<dyn Tool>>>> = Arc::new(\n"
+        "            parking_lot::RwLock::new(std::iter::once(Arc::clone(&probe))\n"
+        "                .chain(members.iter().cloned())\n"
+        "                .chain(std::iter::once(Arc::clone(&sessions))).collect()),\n"
+        "        );\n"
+        "        built.delegate_handle = Some(Arc::clone(&original_parent));\n"
+        "        let allowed = vec![\"delegate\".to_string(), \"sessions\".to_string()];\n"
+        "        let config = Config::default();\n"
+        "        let security = Arc::new(SecurityPolicy {\n"
+        "            excluded_tools: Some(vec![\"sessions_send\".to_string()]),\n"
+        "            ..SecurityPolicy::default()\n"
+        "        });\n"
+        "        let assembled = ScopedToolRegistry::assemble_prepared(ScopedAssembly {\n"
+        "            config: &config, agent_alias: \"default\", security: &security, built,\n"
+        "            skills: &[], runtime: Arc::new(crate::platform::NativeRuntime::new()),\n"
+        "            caller_allowed: Some(&allowed), connect_mcp: false, connect_peripherals: false,\n"
+        "            exclude_memory: false, acp_delivery: true, list_deferred_mcp_specs: false,\n"
+        "            emit_assembly_logs: false, mcp_registry: None,\n"
+        "        }, RegistryConstruction::SuppliedOnly, 0..0).await;\n"
+        "        let delegate = assembled.registry.iter().find(|tool| tool.name() == \"delegate\")\n"
+        "            .expect(\"supplied delegate remains admitted\");\n"
+        "        delegate.execute(serde_json::json!({})).await.expect(\"probe executes\");\n"
+        "        assert_eq!(*selected.lock(), Some(allowed));\n"
+        "        let run_parent = parent_seen.lock().clone().expect(\"run parent view is scoped\");\n"
+        "        assert!(!Arc::ptr_eq(&original_parent, &run_parent));\n"
+        "        let sessions = assembled.registry.iter().find(|tool| tool.name() == \"sessions\")\n"
+        "            .expect(\"projected family remains admitted\");\n"
+        "        let schema = sessions.parameters_schema();\n"
+        "        let actions = schema[\"properties\"][\"action\"][\"enum\"]\n"
+        "            .as_array().expect(\"family action enum\");\n"
+        "        assert!(!actions.iter().any(|action| action == \"send\"));\n"
+        "        let run_parent_guard = run_parent.read();\n"
+        "        let run_family = run_parent_guard.iter().find(|tool| tool.name() == \"sessions\")\n"
+        "            .expect(\"projected family reaches bounded descendants\");\n"
+        "        let parent_schema = run_family.parameters_schema();\n"
+        "        let parent_actions = parent_schema[\"properties\"][\"action\"][\"enum\"]\n"
+        "            .as_array().expect(\"parent family action enum\");\n"
+        "        assert!(!parent_actions.iter().any(|action| action == \"send\"));\n"
+        "        assert!(original_parent.read().iter().any(|tool| tool.name() == \"sessions_send\"));\n"
+        "        assert!(original_parent.read().iter().any(|tool| tool.name() == \"sessions\"\n"
+        "            && tool.parameters_schema()[\"properties\"][\"action\"][\"enum\"]\n"
+        "                .as_array().is_some_and(|actions| actions.iter().any(|action| action == \"send\"))));\n"
+        "    }\n\n"
+        "    #[tokio::test]\n"
+        "    async fn memory_free_assembly_scopes_delegate_without_selector() {\n"
+        "        for construction in [RegistryConstruction::NativeCompat, RegistryConstruction::SuppliedOnly] {\n"
+        "            let observed = Arc::new(parking_lot::Mutex::new(None));\n"
+        "            let probe: Arc<dyn Tool> = Arc::new(MemoryFreeDelegateProbe(Arc::clone(&observed)));\n"
+        "            let mut built = built_with(vec![Box::new(tools::ArcToolRef(Arc::clone(&probe)))]);\n"
+        "            built.unfiltered_tool_arcs = vec![Arc::clone(&probe)];\n"
+        "            let parent: crate::tools::DelegateParentToolsHandle = Arc::new(\n"
+        "                parking_lot::RwLock::new(vec![Arc::clone(&probe)]),\n"
+        "            );\n"
+        "            built.delegate_handle = Some(Arc::clone(&parent));\n"
+        "            let config = Config::default();\n"
+        "            let security = Arc::new(SecurityPolicy::default());\n"
+        "            let assembled = ScopedToolRegistry::assemble_prepared(ScopedAssembly {\n"
+        "                config: &config, agent_alias: \"default\", security: &security, built,\n"
+        "                skills: &[], runtime: Arc::new(crate::platform::NativeRuntime::new()),\n"
+        "                caller_allowed: None, connect_mcp: false, connect_peripherals: false,\n"
+        "                exclude_memory: true, acp_delivery: false, list_deferred_mcp_specs: false,\n"
+        "                emit_assembly_logs: false, mcp_registry: None,\n"
+        "            }, construction, 0..0).await;\n"
+        "            let delegate = assembled.registry.iter().find(|tool| tool.name() == \"delegate\")\n"
+        "                .expect(\"delegate remains admitted\");\n"
+        "            delegate.execute(serde_json::json!({})).await.expect(\"probe executes\");\n"
+        "            assert_eq!(*observed.lock(), Some(true), \"{construction:?}\");\n"
+        "            let run_parent = assembled.delegate_handle.expect(\"scoped parent handle\");\n"
+        "            assert!(!Arc::ptr_eq(&parent, &run_parent), \"{construction:?} parent is isolated\");\n"
+        "            assert_eq!(parent.read().len(), 1, \"{construction:?} keeps the shared parent intact\");\n"
+        "        }\n"
+        "    }\n\n"
+        "    #[tokio::test]\n"
+        "    async fn assemble_threads_caller_allowed_narrowing() {\n",
+    )
+
+    replace_required(
+        scoped,
+        "            tools: tools_registry,\n",
+        "            tools: mut tools_registry,\n",
+    )
+
+    replace_required(
+        scoped,
+        "        let mut tools_registry = BuildRegistry {\n"
+        "            entries: tools_registry\n"
+        "                .into_iter()\n"
+        "                .map(|(tool, supplied, native_memory, actual)| BuildEntry {\n"
+        "                    value: Some(BuildSlot::Ready(actual.unwrap_or_else(|| Arc::from(tool)))),\n"
+        "                    top_level: true,\n"
+        "                    origin: if supplied {\n"
+        "                        EntryOrigin::Supplied\n"
+        "                    } else {\n"
+        "                        EntryOrigin::Native\n"
+        "                    },\n"
+        "                    native_memory,\n"
+        "                })\n"
+        "                .collect(),\n"
+        "        };\n",
+        "        let mut tools_registry = BuildRegistry {\n"
+        "            entries: tools_registry\n"
+        "                .into_iter()\n"
+        "                .map(|(tool, supplied, native_memory, actual)| BuildEntry {\n"
+        "                    value: Some(BuildSlot::Ready(actual.unwrap_or_else(|| Arc::from(tool)))),\n"
+        "                    top_level: true,\n"
+        "                    origin: if supplied {\n"
+        "                        EntryOrigin::Supplied\n"
+        "                    } else {\n"
+        "                        EntryOrigin::Native\n"
+        "                    },\n"
+        "                    native_memory,\n"
+        "                })\n"
+        "                .collect(),\n"
+        "        };\n"
+        "        {\n"
+        "            for entry in &mut tools_registry.entries {\n"
+        "                if let Some(BuildSlot::Ready(tool)) = entry.value.as_mut()\n"
+        "                    && tool.name() == crate::tools::DelegateTool::NAME\n"
+        "                {\n"
+        "                    *tool = crate::tools::delegate::scope_caller_tool(\n"
+        "                        Arc::clone(tool),\n"
+        "                        caller_allowed.map(|allowed| allowed.to_vec()),\n"
+        "                        delegate_handle.clone(),\n"
+        "                        exclude_memory,\n"
+        "                    );\n"
+        "                }\n"
+        "            }\n"
+        "        }\n",
+    )
+
+    replace_required(
+        delegate_tools,
+        "    fn same_hop_parent_tools(&self) -> OwnedParentTools {\n"
+        "        OwnedParentTools {\n"
+        "            memory_policies: Some(self.memory_policies_for_target(&self.security)),\n"
+        "            ..self.parent_tools.clone()\n"
+        "        }\n"
+        "    }\n",
+        "    fn same_hop_parent_tools(&self) -> OwnedParentTools {\n"
+        "        OwnedParentTools {\n"
+        "            tools: current_delegate_caller_parent_tools()\n"
+        "                .unwrap_or_else(|| Arc::clone(&self.parent_tools.tools)),\n"
+        "            origins: self.parent_tools.origins.clone(),\n"
+        "            memory_policies: Some(self.memory_policies_for_target(&self.security)),\n"
+        "        }\n"
+        "    }\n",
+    )
+    replace_required(
+        delegate_tools,
+        "                let snapshot = {\n"
+        "                    let parent_tools = self.parent_tools.tools.read();\n"
+        "                    self.parent_tools.origins.snapshot(&parent_tools)\n"
+        "                };\n",
+        "                let parent_tools_handle = current_delegate_caller_parent_tools()\n"
+        "                    .unwrap_or_else(|| Arc::clone(&self.parent_tools.tools));\n"
+        "                let snapshot = {\n"
+        "                    let parent_tools = parent_tools_handle.read();\n"
+        "                    self.parent_tools.origins.snapshot(&parent_tools)\n"
+        "                };\n",
+    )
+
+    replace_required(
+        delegate_tools,
+        "        let parent_step_scope = crate::sop::active_scope::active_headless_step_scope();\n"
+        "        let __zc_delegate_alias = agent_name_owned.clone();\n",
+        "        let parent_step_scope = crate::sop::active_scope::active_headless_step_scope();\n"
+        "        let parent_caller_tool_selector = current_delegate_caller_tool_selector();\n"
+        "        let parent_caller_parent_tools = current_delegate_caller_parent_tools();\n"
+        "        let parent_caller_memory_free = current_delegate_caller_memory_free();\n"
+        "        let __zc_delegate_alias = agent_name_owned.clone();\n",
+    )
+    replace_required(
+        delegate_tools,
+        "        let parent_step_scope = crate::sop::active_scope::active_headless_step_scope();\n\n"
+        "        // Spawn all agents concurrently\n",
+        "        let parent_step_scope = crate::sop::active_scope::active_headless_step_scope();\n"
+        "        let parent_caller_tool_selector = current_delegate_caller_tool_selector();\n\n"
+        "        let parent_caller_parent_tools = current_delegate_caller_parent_tools();\n"
+        "        let parent_caller_memory_free = current_delegate_caller_memory_free();\n"
+        "        // Spawn all agents concurrently\n",
+    )
+    replace_required(
+        delegate_tools,
+        "            let step_scope = parent_step_scope.clone();\n"
+        "            let memory = self.memory.clone();\n",
+        "            let step_scope = parent_step_scope.clone();\n"
+        "            let parent_caller_tool_selector = parent_caller_tool_selector.clone();\n"
+        "            let parent_caller_parent_tools = parent_caller_parent_tools.clone();\n"
+        "            let parent_caller_memory_free = parent_caller_memory_free;\n"
+        "            let memory = self.memory.clone();\n",
+    )
+    replace_count_required(
+        delegate_tools,
+        "Box::pin(inner.execute_sync_with_target_admission(\n",
+        "Box::pin(scope_delegate_caller_context(\n"
+        "                    parent_caller_tool_selector,\n"
+        "                    parent_caller_parent_tools,\n"
+        "                    parent_caller_memory_free,\n"
+        "                    inner.execute_sync_with_target_admission(\n",
+        2,
+    )
+    replace_count_required(
+        delegate_tools,
+        "                    target_execution_admission.clone(),\n"
+        "                ));\n",
+        "                    target_execution_admission.clone(),\n"
+        "                    ),\n"
+        "                ));\n",
+        1,
+    )
+    replace_required(
+        delegate_tools,
+        "                                                target_execution_admission,\n"
+        "                                            ));\n",
+        "                                                target_execution_admission,\n"
+        "                                            ),\n"
+        "                                        ));\n",
+    )
+
+    replace_required(
+        scoped,
+        "            delegate_tool: _,\n"
+        "        } = built;\n\n"
+        "        // 1. Peripherals. Loading CONNECTS hardware (serial opens are exclusive for\n",
+        "            delegate_tool: _,\n"
+        "        } = built;\n\n"
+        "        let delegate_handle = if caller_allowed.is_some() || exclude_memory || acp_delivery {\n"
+        "            delegate_handle.map(|parent| {\n"
+        "                Arc::new(parking_lot::RwLock::new(parent.read().clone()))\n"
+        "            })\n"
+        "        } else {\n"
+        "            delegate_handle\n"
+        "        };\n"
+        "        {\n"
+        "            for tool in &mut unfiltered_tool_arcs {\n"
+        "                if tool.name() == crate::tools::DelegateTool::NAME {\n"
+        "                    *tool = crate::tools::delegate::scope_caller_tool(\n"
+        "                        Arc::clone(tool),\n"
+        "                        caller_allowed.map(|allowed| allowed.to_vec()),\n"
+        "                        delegate_handle.clone(),\n"
+        "                        exclude_memory,\n"
+        "                    );\n"
+        "                }\n"
+        "            }\n"
+        "        }\n\n"
+        "        // Family wrappers are created before the principal's per-run scope is\n"
+        "        // known. Replace them here with wrappers whose actions contain only\n"
+        "        // members admitted by the same policy and caller selector as the raw\n"
+        "        // tools. A constrained principal must never reach an unrestricted\n"
+        "        // member through a family wrapper.\n"
+        "        let family_names: HashSet<&str> = crate::tools::families::FAMILIES\n"
+        "            .iter()\n"
+        "            .map(|family| family.name)\n"
+        "            .collect();\n"
+        "        let selected_family_names: HashSet<String> = tools_registry\n"
+        "            .iter()\n"
+        "            .filter_map(|tool| {\n"
+        "                family_names\n"
+        "                    .contains(tool.name())\n"
+        "                    .then(|| tool.name().to_string())\n"
+        "            })\n"
+        "            .collect();\n"
+        "        tools_registry.retain(|tool| !family_names.contains(tool.name()));\n"
+        "        unfiltered_tool_arcs.retain(|tool| !family_names.contains(tool.name()));\n"
+        "        let family_tools: Vec<Arc<dyn Tool>> = crate::tools::families::FAMILIES\n"
+        "            .iter()\n"
+        "            .filter(|family| selected_family_names.contains(family.name))\n"
+        "            .filter(|family| !security.is_tool_excluded(family.name))\n"
+        "            .filter_map(|family| {\n"
+        "                let members: Vec<Arc<dyn Tool>> = unfiltered_tool_arcs\n"
+        "                    .iter()\n"
+        "                    .filter(|tool| family.members.contains(&tool.name()))\n"
+        "                    .filter(|tool| {\n"
+        "                        let policy_allowed = !security.is_tool_excluded(tool.name())\n"
+        "                            && (security.is_tool_allowed(tool.name())\n"
+        "                                || security.is_tool_allowed(family.name));\n"
+        "                        let caller_allowed_member = caller_allowed.is_none_or(|allowed| {\n"
+        "                            allowed.iter().any(|name| {\n"
+        "                                name == tool.name() || name == family.name\n"
+        "                            })\n"
+        "                        });\n"
+        "                        let principal_allowed = caller_allowed.is_none()\n"
+        "                            || !tool.requires_unrestricted_principal();\n"
+        "                        policy_allowed && caller_allowed_member && principal_allowed\n"
+        "                    })\n"
+        "                    .filter(|tool| {\n"
+        "                        tool_allowed_in_context(tool.name(), exclude_memory, acp_delivery)\n"
+        "                    })\n"
+        "                    .cloned()\n"
+        "                    .collect();\n"
+        "                crate::tools::families::FamilyTool::build(family, members)\n"
+        "                    .map(|family_tool| Arc::new(family_tool) as Arc<dyn Tool>)\n"
+        "            })\n"
+        "            .collect();\n"
+        "        unfiltered_tool_arcs.extend(family_tools.iter().cloned());\n\n"
+        "        // 1. Peripherals. Loading CONNECTS hardware (serial opens are exclusive for\n",
+    )
+
+    replace_required(
+        scoped,
+        "        if let Some(parent) = delegate_handle.as_ref() {\n"
+        "            parent\n"
+        "                .write()\n"
+        "                .retain(|tool| tool_allowed_in_context(tool.name(), exclude_memory, acp_delivery));\n"
+        "        }\n\n"
+        "        // 4. MCP: scope servers per `mcp_bundles` (omission is not a grant), then gate\n",
+        "        if let Some(parent) = delegate_handle.as_ref() {\n"
+        "            parent\n"
+        "                .write()\n"
+        "                .retain(|tool| tool_allowed_in_context(tool.name(), exclude_memory, acp_delivery));\n"
+        "        }\n"
+        "        for family_tool in &family_tools {\n"
+        "            builtin_names.insert(family_tool.name().to_string());\n"
+        "            tools_registry.push(BuildSlot::Ready(Arc::clone(family_tool)));\n"
+        "        }\n\n"
+        "        // 4. MCP: scope servers per `mcp_bundles` (omission is not a grant), then gate\n",
+    )
+
+    replace_required(
+        scoped,
+        "        for family_tool in &family_tools {\n"
+        "            builtin_names.insert(family_tool.name().to_string());\n"
+        "            tools_registry.push(BuildSlot::Ready(Arc::clone(family_tool)));\n"
+        "        }\n\n",
+        "        for family_tool in &family_tools {\n"
+        "            builtin_names.insert(family_tool.name().to_string());\n"
+        "            tools_registry.push(BuildSlot::Ready(Arc::clone(family_tool)));\n"
+        "            if let Some(parent) = delegate_handle.as_ref() {\n"
+        "                let mut parent = parent.write();\n"
+        "                if !parent.iter().any(|tool| tool.name() == family_tool.name()) {\n"
+        "                    parent.push(Arc::clone(family_tool));\n"
+        "                }\n"
+        "            }\n"
+        "        }\n\n",
+    )
+
+    agent = source / "crates/zeroclaw-runtime/src/agent/agent.rs"
+    replace_required(
+        agent,
+        "        if let Some(ref allow_list) = allowed {\n"
+        "            tools.retain(|t| allow_list.iter().any(|name| name == t.name()));\n"
+        "        }\n",
+        "        if let Some(ref allow_list) = allowed {\n"
+        "            tools.retain(|tool| {\n"
+        "                allow_list.iter().any(|name| name == tool.name())\n"
+        "                    || crate::tools::families::FAMILIES.iter().any(|family| {\n"
+        "                        family.name == tool.name()\n"
+        "                            && family.members.iter().any(|member| {\n"
+        "                                allow_list.iter().any(|name| name == member)\n"
+        "                            })\n"
+        "                    })\n"
+        "            });\n"
+        "        }\n",
+    )
+
+    replace_required(
+        agent,
+        "        let held = self.tools.len();\n"
+        "        self.tools.retain(|tool| {\n"
+        "            (delegate_withholds && tool.name() == crate::tools::DelegateTool::NAME)\n"
+        "                || !tool.requires_unrestricted_principal()\n"
+        "        });\n"
+        "        // This runs at prompt and steering admission; rebuild only when the\n"
+        "        // tool set it lists actually changed.\n"
+        "        if self.tools.len() != held {\n"
+        "            self.refresh_system_prompt();\n"
+        "        }\n",
+        "        let mut changed = false;\n"
+        "        self.tools.retain_projected(|tool| {\n"
+        "                if delegate_withholds\n"
+        "                    && tool.name() == crate::tools::DelegateTool::NAME\n"
+        "                {\n"
+        "                    return Some(tool);\n"
+        "                }\n"
+        "                if tool.requires_unrestricted_principal() {\n"
+        "                    changed = true;\n"
+        "                    return tool.restricted_principal_variant();\n"
+        "                }\n"
+        "                Some(tool)\n"
+        "            });\n"
+        "        if changed {\n"
+        "            self.refresh_system_prompt();\n"
+        "        }\n",
+    )
+
+    runtime_tools = source / "crates/zeroclaw-runtime/src/tools/mod.rs"
+    replace_required(
+        runtime_tools,
+        "        built.tools = built.native_memory.wrap_actual_tools(tools);\n"
+        "        built\n",
+        "        built.tools = built.native_memory.wrap_actual_tools(tools);\n"
+        "        built.unfiltered_tool_arcs = tools.to_vec();\n"
+        "        built\n",
+    )
+
+    gateway = source / "crates/zeroclaw-gateway/src/dashboard_core.rs"
+    replace_required(
+        gateway,
+        "    // ── Tools a member's chat is offered ─────────────────────────────────\n",
+        "    async fn offered_actions(model: &MockServer, marker: &str, tool_name: &str) -> Vec<String> {\n"
+        "        let requests = model.received_requests().await.unwrap_or_default();\n"
+        "        for request in requests.iter().filter(|request| {\n"
+        "            String::from_utf8_lossy(&request.body).contains(marker)\n"
+        "        }) {\n"
+        "            let body: serde_json::Value =\n"
+        "                serde_json::from_slice(&request.body).expect(\"a JSON request\");\n"
+        "            for tool in body[\"tools\"].as_array().into_iter().flatten() {\n"
+        "                if tool[\"function\"][\"name\"].as_str() == Some(tool_name) {\n"
+        "                    return tool[\"function\"][\"parameters\"][\"properties\"][\"action\"][\"enum\"]\n"
+        "                        .as_array()\n"
+        "                        .into_iter()\n"
+        "                        .flatten()\n"
+        "                        .filter_map(|action| action.as_str().map(str::to_string))\n"
+        "                        .collect();\n"
+        "                }\n"
+        "            }\n"
+        "        }\n"
+        "        Vec::new()\n"
+        "    }\n\n"
+        "    // ── Tools a member's chat is offered ─────────────────────────────────\n",
+    )
+    replace_required(
+        gateway,
+        '        for kept in ["sessions_current", "file_read"] {\n'
+        "            assert!(\n"
+        "                offered.iter().any(|name| name == kept),\n"
+        '                "{kept} is offered: {offered:?}"\n'
+        "            );\n"
+        "        }\n",
+        '        for kept in ["sessions", "file_read"] {\n'
+        "            assert!(\n"
+        "                offered.iter().any(|name| name == kept),\n"
+        '                "{kept} is offered: {offered:?}"\n'
+        "            );\n"
+        "        }\n"
+        "        assert_eq!(\n"
+        '            offered_actions(&fixture._model, marker, "sessions").await,\n'
+        '            vec!["current"],\n'
+        '            "constrained principals must not see unrestricted session actions"\n'
+        "        );\n",
+    )
+
+    with delegate_tools.open("a") as stream:
+        stream.write(
+            "\n#[cfg(test)]\n"
+            "mod enact_caller_selector_scope_tests {\n"
+            "    use super::*;\n\n"
+            "    #[tokio::test]\n"
+            "    async fn spawned_caller_context_preserves_selector_and_memory_policy() {\n"
+            "        let selector = vec![\"delegate\".to_string()];\n"
+            "        let expected_selector = selector.clone();\n"
+        "        let observed = zeroclaw_spawn::spawn!(scope_delegate_caller_context(\n"
+            "            Some(selector),\n"
+            "            None,\n"
+            "            true,\n"
+            "            async {\n"
+            "                (current_delegate_caller_tool_selector(), current_delegate_caller_memory_free())\n"
+            "            },\n"
+            "        ))\n"
+            "        .await\n"
+            "        .expect(\"caller context probe task joins\");\n"
+            "        assert_eq!(observed, (Some(expected_selector), true));\n"
+            "    }\n"
+            "}\n"
+        )
 
 
 def _tool_declares_action(tool_source):
@@ -628,7 +2135,10 @@ def project_environment_literals(text):
             end = closing + len(delimiter)
             token = text[match.start():end]
         if token.startswith('"') or match.group("hashes") is not None:
-            projected = token.replace("ZEROCLAW_", "ENACT_AGENT_")
+            # Docker build ARG names are internal container interfaces, not
+            # runtime environment variables. Keep their upstream namespace so
+            # generated Docker zones and their Rust-side drift checks agree.
+            projected = re.sub(r"ZEROCLAW_(?!BASE_|CARGO_FLAGS\b)", "ENACT_AGENT_", token)
             if projected != token:
                 pieces.extend((text[copied:match.start()], projected))
                 copied = end
@@ -645,6 +2155,831 @@ def project_environment(source):
         projected = project_environment_literals(original)
         if projected != original:
             path.write_text(projected)
+
+
+def project_enact_excluded_memory_isolation(source):
+    """Carry memory-free policy through independent and bounded delegation."""
+    agent = source / "crates/zeroclaw-runtime/src/agent/agent.rs"
+    replace_required(
+        agent,
+        "        let memory: Arc<dyn Memory> = capabilities.agent_memory(config, agent_alias).await?;\n",
+        "        let memory: Arc<dyn Memory> = if exclude_memory {\n"
+        "            Arc::new(zeroclaw_memory::NoneMemory::new(\"none\"))\n"
+        "        } else {\n"
+        "            capabilities.agent_memory(config, agent_alias).await?\n"
+        "        };\n",
+    )
+    replace_required(
+        agent,
+        "        self.tools\n"
+        "            .rebind_memory_tools(&self.memory, Arc::clone(&routed), &self.memory_security)?;\n",
+        "        // Excluded sessions use a fresh `NoneMemory` in `AgentBuilder`;\n"
+        "        // native memory captures are unreachable there and retain the\n"
+        "        // factory's own `NoneMemory` rather than being rebound to a different Arc.\n"
+        "        if self.inject_memory {\n"
+        "            self.tools\n"
+        "                .rebind_memory_tools(&self.memory, Arc::clone(&routed), &self.memory_security)?;\n"
+        "        }\n",
+    )
+
+    delegate = source / "crates/zeroclaw-runtime/src/tools/delegate.rs"
+    replace_required(
+        delegate,
+        "        let memory = self\n"
+        "            .memory_for_target_agent(Some(config), agent_name)\n"
+        "            .await?\n"
+        "            .ok_or_else(|| {\n"
+        "                anyhow::Error::msg(format!(\n"
+        "                    \"Failed to initialize memory for independent delegate target '{agent_name}'\"\n"
+        "                ))\n"
+        "            })?;\n",
+        "        let memory_free = current_delegate_caller_memory_free();\n"
+        "        let memory: Arc<dyn Memory> = if memory_free {\n"
+        "            Arc::new(zeroclaw_memory::NoneMemory::new(\"none\"))\n"
+        "        } else {\n"
+        "            self.memory_for_target_agent(Some(config), agent_name)\n"
+        "                .await?\n"
+        "                .ok_or_else(|| {\n"
+        "                    anyhow::Error::msg(format!(\n"
+        "                        \"Failed to initialize memory for independent delegate target '{agent_name}'\"\n"
+        "                    ))\n"
+        "                })?\n"
+        "        };\n",
+    )
+    replace_required(
+        delegate,
+        "                caller_allowed: caller_scope.as_deref(),\n"
+        "                connect_mcp: true,\n"
+        "                connect_peripherals: false,\n"
+        "                exclude_memory: false,\n"
+        "                acp_delivery: false,\n",
+        "                caller_allowed: caller_scope.as_deref(),\n"
+        "                connect_mcp: true,\n"
+        "                connect_peripherals: false,\n"
+        "                exclude_memory: memory_free,\n"
+        "                acp_delivery: false,\n",
+    )
+    test_signature = (
+        "    async fn independent_agentic_tools_use_target_registry_not_parent_registry() {"
+    )
+    text = delegate.read_text()
+    if text.count(test_signature) != 1:
+        raise RuntimeError(
+            "Upstream overlay drift: expected exactly one independent target registry test"
+        )
+    start = text.index(test_signature)
+    end = text.find("\n    #[tokio::test]", start)
+    if end == -1:
+        raise RuntimeError(
+            "Upstream overlay drift: independent target registry test has no following test"
+        )
+    body = text[start:end]
+
+    def replace_test_block(old, new):
+        nonlocal body
+        if body.count(old) != 1:
+            raise RuntimeError(
+                "Upstream overlay drift: independent target registry test anchor changed"
+            )
+        body = body.replace(old, new)
+
+    replace_test_block(
+        '                allowed_tools: vec!["shell".to_string()],\n',
+        '                allowed_tools: vec![\n'
+        '                    "shell".to_string(),\n'
+        '                    "memory_store".to_string(),\n'
+        '                    "memory_recall".to_string(),\n'
+        '                ],\n',
+    )
+    replace_test_block(
+        '            .independent_agentic_tools_for_target("target", target_policy)\n',
+        '            .independent_agentic_tools_for_target("target", Arc::clone(&target_policy))\n',
+    )
+    replace_test_block(
+        '        assert!(\n'
+        '            !tool_names.contains(&"echo_tool"),\n'
+        '            "independent target must not inherit parent-only tools"\n'
+        '        );\n',
+        '        assert!(\n'
+        '            !tool_names.contains(&"echo_tool"),\n'
+        '            "independent target must not inherit parent-only tools"\n'
+        '        );\n'
+        '        let memory_tool_names = [\n'
+        '            "memory", "memory_store", "memory_recall", "memory_forget",\n'
+        '            "memory_export", "memory_purge",\n'
+        '        ];\n'
+        '        assert!(\n'
+        '            memory_tool_names.iter().any(|name| tool_names.contains(name)),\n'
+        '            "control: the target policy admits persistent memory tools: {tool_names:?}"\n'
+        '        );\n'
+        '        let memory_free = scope_delegate_caller_context(\n'
+        '            None, None, true, async {\n'
+        '                tool.independent_agentic_tools_for_target(\n'
+        '                    "target", Arc::clone(&target_policy),\n'
+        '                )\n'
+        '                .await\n'
+        '            },\n'
+        '        )\n'
+        '        .await\n'
+        '        .expect("memory-free target registry builds");\n'
+        '        let memory_free_names: Vec<&str> = memory_free\n'
+        '            .tools\n'
+        '            .iter()\n'
+        '            .map(|tool| tool.name())\n'
+        '            .collect();\n'
+        '        assert!(\n'
+        '            !memory_tool_names.iter().any(|name| memory_free_names.contains(name)),\n'
+        '            "memory-free caller must not regain memory in independent target: {memory_free_names:?}"\n'
+        '        );\n',
+    )
+    delegate.write_text(text[:start] + body + text[end:])
+
+
+def project_enact_upstream_clippy_fixes(source):
+    """Keep the Enact-pinned upstream tree clean under current Clippy."""
+    replace_required(
+        source / "crates/zeroclaw-infra/src/acp_session_store.rs",
+        "                        && !text.as_deref().is_some_and(|text| !text.is_empty())\n",
+        "                        && text.as_deref().is_none_or(|text| text.is_empty())\n",
+    )
+
+    config_manager = source / "apps/zerocode/src/config_manager.rs"
+    replace_required(
+        config_manager,
+        "        if !self.editor_owns_key(&key)\n"
+        "            && !(self.wants_text_input()\n"
+        "                && matches!(key.code, KeyCode::Char(_)) // keyguard: literal text must not trigger a list navigation binding.\n"
+        "                && !key\n"
+        "                    .modifiers\n"
+        "                    .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::ALT))\n",
+        "        if !(self.editor_owns_key(&key)\n"
+        "            || (self.wants_text_input()\n"
+        "                && matches!(key.code, KeyCode::Char(_)) // keyguard: literal text must not trigger a list navigation binding.\n"
+        "                && !key\n"
+        "                    .modifiers\n"
+        "                    .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::ALT)))\n",
+    )
+
+    turn_control = source / "crates/zeroclaw-runtime/src/agent/turn_control.rs"
+    replace_required(
+        turn_control,
+        ".try_with(|handle| lock(&handle).mode())",
+        ".try_with(|handle| lock(handle).mode())",
+    )
+    replace_required(
+        turn_control,
+        "PLAN_MODE_EXEMPT.iter().any(|name| *name == tool_name)",
+        "PLAN_MODE_EXEMPT.contains(&tool_name)",
+    )
+
+    hook_command = source / "crates/zeroclaw-runtime/src/hooks/command.rs"
+    replace_required(
+        hook_command,
+        "use async_trait::async_trait;\n",
+        "use anyhow::Context as _;\nuse async_trait::async_trait;\n",
+    )
+    replace_required(
+        hook_command,
+        '.spawn()\n            .map_err(|error| anyhow::anyhow!("failed to run the hook command: {error}"))?;',
+        '.spawn()\n            .context("failed to run the hook command")?;',
+    )
+    replace_required(
+        hook_command,
+        '.map_err(|_| anyhow::anyhow!("the hook command timed out"))?\n'
+        '            .map_err(|error| anyhow::anyhow!("the hook command failed: {error}"))?;',
+        '.context("the hook command timed out")?\n'
+        '            .context("the hook command failed")?;',
+    )
+
+    dispatch = source / "crates/zeroclaw-runtime/src/rpc/dispatch.rs"
+    replace_required(
+        dispatch,
+        "                    && !session\n"
+        "                        .as_ref()\n"
+        "                        .is_some_and(|s| s.owner_tui_id() == self.tui_id.as_deref())\n",
+        "                    && session\n"
+        "                        .as_ref()\n"
+        "                        .is_none_or(|s| s.owner_tui_id() != self.tui_id.as_deref())\n",
+    )
+
+    ast_grep = source / "crates/zeroclaw-runtime/src/tools/ast_grep.rs"
+    replace_required(
+        ast_grep,
+        "use async_trait::async_trait;\n",
+        "use anyhow::Context as _;\nuse async_trait::async_trait;\n",
+    )
+    replace_required(
+        ast_grep,
+        '.spawn()\n        .map_err(|error| anyhow::anyhow!("could not run ast-grep: {error}"))?;',
+        '.spawn()\n        .context("could not run ast-grep")?;',
+    )
+    replace_required(
+        ast_grep,
+        '.await\n    .map_err(|_| anyhow::anyhow!("ast-grep timed out"))?\n'
+        '    .map_err(|error| anyhow::anyhow!("ast-grep failed: {error}"))?;',
+        '.await\n    .context("ast-grep timed out")?\n'
+        '    .context("ast-grep failed")?;',
+    )
+    replace_count_required(
+        ast_grep,
+        'canonicalize(&path)\n            .map_err(|error| anyhow::anyhow!("cannot read {}: {error}", path.display()))?;',
+        'canonicalize(&path)\n            .with_context(|| format!("cannot read {}", path.display()))?;',
+        1,
+    )
+    replace_required(
+        ast_grep,
+        'std::fs::read_to_string(&resolved)\n            .map_err(|error| anyhow::anyhow!("cannot read {}: {error}", path.display()))?;',
+        'std::fs::read_to_string(&resolved)\n            .with_context(|| format!("cannot read {}", path.display()))?;',
+    )
+    replace_required(
+        ast_grep,
+        'std::fs::write(&resolved, &after)\n'
+        '            .map_err(|error| anyhow::anyhow!("cannot write {}: {error}", resolved.display()))?;',
+        'std::fs::write(&resolved, &after)\n'
+        '            .with_context(|| format!("cannot write {}", resolved.display()))?;',
+    )
+
+    delegate = source / "crates/zeroclaw-runtime/src/tools/delegate.rs"
+    replace_required(
+        delegate,
+        "            let parent_caller_memory_free = parent_caller_memory_free;\n",
+        "",
+    )
+
+    file_read_modes = source / "crates/zeroclaw-runtime/src/tools/file_read_modes.rs"
+    replace_count_required(
+        file_read_modes,
+        '        for index in start..end {\n'
+        '            out.push_str(&format!("{}: {}\\n", index + 1, lines[index]));\n'
+        '        }\n',
+        '        for (index, line) in lines.iter().enumerate().take(end).skip(start) {\n'
+        '            out.push_str(&format!("{}: {}\\n", index + 1, line));\n'
+        '        }\n',
+        2,
+    )
+
+    learn = source / "crates/zeroclaw-runtime/src/tools/learn.rs"
+    replace_required(
+        learn,
+        '            .record(lesson, &tags)\n'
+        '            .await\n'
+        '            .map_err(|error| anyhow::anyhow!("{error}"))?;',
+        '            .record(lesson, &tags)\n'
+        '            .await\n'
+        '            .map_err(anyhow::Error::msg)?;',
+    )
+    replace_required(
+        learn,
+        '            self.fold_into_skill(skill, lesson, &tags)\n'
+        '                .await\n'
+        '                .map_err(|error| anyhow::anyhow!("{error}"))?;',
+        '            self.fold_into_skill(skill, lesson, &tags)\n'
+        '                .await\n'
+        '                .map_err(anyhow::Error::msg)?;',
+    )
+
+    scoped = source / "crates/zeroclaw-runtime/src/tools/scoped.rs"
+    replace_required(
+        scoped,
+        "        mut project: impl FnMut(Box<dyn Tool>) -> Option<Box<dyn Tool>>,\n",
+        "        project: impl FnMut(Box<dyn Tool>) -> Option<Box<dyn Tool>>,\n",
+    )
+    replace_required(
+        scoped,
+        ".filter_map(|tool| project(tool))",
+        ".filter_map(project)",
+    )
+    replace_required(
+        scoped,
+        "            .filter_map(|tool| {\n"
+        "                family_names\n"
+        "                    .contains(tool.name())\n"
+        "                    .then(|| tool.name().to_string())\n"
+        "            })\n",
+        "            .filter(|tool| family_names.contains(tool.name()))\n"
+        "            .map(|tool| tool.name().to_string())\n",
+    )
+
+    wait_task = source / "crates/zeroclaw-runtime/src/tools/wait_task.rs"
+    replace_required(
+        wait_task,
+        "use async_trait::async_trait;\n",
+        "use anyhow::Context as _;\nuse async_trait::async_trait;\n",
+    )
+    replace_required(
+        wait_task,
+        '.get_snapshot(task_id)\n                .await\n'
+        '                .map_err(|error| anyhow::anyhow!("could not read the task registry: {error}"))?;',
+        '.get_snapshot(task_id)\n                .await\n'
+        '                .context("could not read the task registry")?;',
+    )
+
+    release_workflow = source / "tests/architecture/release_workflow.rs"
+    replace_required(
+        release_workflow,
+        '    let fails = !failure.is_empty()\n'
+        '        && !(context.target == "aarch64-linux-android"\n'
+        '            && matches!(failure, "zerocode" | "zerorelay"));\n',
+        '    let fails = !(failure.is_empty()\n'
+        '        || context.target == "aarch64-linux-android"\n'
+        '            && matches!(failure, "zerocode" | "zerorelay"));\n',
+    )
+
+    tool_specs = source / "crates/zeroclaw-runtime/src/agent/turn/tool_specs.rs"
+    replace_required(
+        tool_specs,
+        '                    let tool: Box<dyn Tool> = Box::new(CountingTool::new(\n'
+        '                        *member,\n',
+        '                    let tool: Box<dyn Tool> = Box::new(CountingTool::new(\n'
+        '                        member,\n',
+    )
+
+    main = source / "src/main.rs"
+    replace_required(
+        main,
+        '            mcp_server::cli::run(command).await?;\n',
+        '            Box::pin(mcp_server::cli::run(command)).await?;\n',
+    )
+
+
+def project_enact_memory_free_parent_scope(source):
+    """Keep a memory-free delegate view run-local and aligned with its Agent."""
+    delegate = source / "crates/zeroclaw-runtime/src/tools/delegate.rs"
+    replace_required(
+        delegate,
+        "pub struct DelegateTool {\n",
+        "#[derive(Clone)]\n"
+        "pub struct DelegateTool {\n",
+    )
+    replace_required(
+        delegate,
+        "    pub fn parent_tools_handle(&self) -> Arc<RwLock<Vec<Arc<dyn Tool>>>> {\n"
+        "        Arc::clone(&self.parent_tools.tools)\n"
+        "    }\n",
+        "    pub fn parent_tools_handle(&self) -> Arc<RwLock<Vec<Arc<dyn Tool>>>> {\n"
+        "        Arc::clone(&self.parent_tools.tools)\n"
+        "    }\n\n"
+        "    pub(crate) fn with_parent_tools_handle(\n"
+        "        &self,\n"
+        "        handle: Arc<RwLock<Vec<Arc<dyn Tool>>>>,\n"
+        "    ) -> Self {\n"
+        "        let mut scoped = self.clone();\n"
+        "        scoped.parent_tools.tools = handle;\n"
+        "        scoped\n"
+        "    }\n",
+    )
+
+    agent = source / "crates/zeroclaw-runtime/src/agent/agent.rs"
+    replace_required(
+        agent,
+        "        let deferred_section = assembled.deferred_section().to_string();\n",
+        "        // Keep the concrete delegate retained by Agent on the same scoped\n"
+        "        // parent view used by its advertised registry. Memory-free assembly\n"
+        "        // clones and filters that view, so retaining the factory instance\n"
+        "        // here would reintroduce memory into later delegate constructions.\n"
+        "        let built_delegate_tool = built_delegate_tool.map(|delegate| {\n"
+        "            if let Some(parent) = assembled.delegate_handle.as_ref() {\n"
+        "                Arc::new(delegate.with_parent_tools_handle(Arc::clone(parent)))\n"
+        "            } else {\n"
+        "                delegate\n"
+        "            }\n"
+        "        });\n"
+        "        let deferred_section = assembled.deferred_section().to_string();\n",
+    )
+
+    scoped = source / "crates/zeroclaw-runtime/src/tools/scoped.rs"
+    replace_count_required(
+        scoped,
+        "if tool.name() == crate::tools::DelegateTool::NAME {\n",
+        "if matches!(\n"
+        "                    tool.name(),\n"
+        "                    crate::tools::DelegateTool::NAME | crate::tools::SpawnSubagentTool::NAME\n"
+        "                ) {\n",
+        2,
+    )
+    replace_required(
+        scoped,
+        "if actual.name() == crate::tools::DelegateTool::NAME {\n",
+        "if matches!(\n"
+        "            actual.name(),\n"
+        "            crate::tools::DelegateTool::NAME | crate::tools::SpawnSubagentTool::NAME\n"
+        "        ) {\n",
+    )
+    replace_required(
+        scoped,
+        "&& tool.name() == crate::tools::DelegateTool::NAME\n",
+        "&& matches!(\n"
+        "                        tool.name(),\n"
+        "                        crate::tools::DelegateTool::NAME | crate::tools::SpawnSubagentTool::NAME\n"
+        "                    )\n",
+    )
+
+    spawn_subagent = source / "crates/zeroclaw-runtime/src/tools/spawn_subagent.rs"
+    replace_required(
+        spawn_subagent,
+        "fn child_run_overrides(\n"
+        "    policy: Arc<SecurityPolicy>,\n"
+        "    memory: Option<Arc<dyn zeroclaw_memory::Memory>>,\n"
+        ") -> AgentRunOverrides {\n",
+        "fn child_run_overrides(\n"
+        "    policy: Arc<SecurityPolicy>,\n"
+        "    memory: Option<Arc<dyn zeroclaw_memory::Memory>>,\n"
+        "    memory_free: bool,\n"
+        ") -> AgentRunOverrides {\n",
+    )
+    replace_required(
+        spawn_subagent,
+        "        memory,\n"
+        "        is_subagent: true,\n",
+        "        memory: if memory_free { None } else { memory },\n"
+        "        is_subagent: true,\n",
+    )
+    replace_required(
+        spawn_subagent,
+        "        memory_free: false,\n",
+        "        memory_free,\n",
+    )
+    replace_required(
+        spawn_subagent,
+        "        let mut run_overrides =\n"
+        "            child_run_overrides(subagent_ctx.policy.clone(), self.child_memory());\n",
+        "        let caller_memory_free = crate::tools::delegate::current_delegate_caller_memory_free();\n"
+        "        let mut run_overrides = child_run_overrides(\n"
+        "            subagent_ctx.policy.clone(),\n"
+        "            self.child_memory(),\n"
+        "            caller_memory_free,\n"
+        "        );\n",
+    )
+    replace_count_required(
+        spawn_subagent,
+        "child_run_overrides(Arc::new(SecurityPolicy::default()), None)",
+        "child_run_overrides(Arc::new(SecurityPolicy::default()), None, false)",
+        2,
+    )
+    replace_required(
+        spawn_subagent,
+        "child_run_overrides(Arc::new(SecurityPolicy::default()), tool.child_memory())",
+        "child_run_overrides(Arc::new(SecurityPolicy::default()), tool.child_memory(), false)",
+    )
+    replace_required(
+        spawn_subagent,
+        "    #[test]\n"
+        "    fn spawn_subagent_dyn_tool_implements_attributable() {\n",
+        "    #[test]\n"
+        "    fn memory_free_child_drops_routed_memory() {\n"
+        "        let routed: Arc<dyn zeroclaw_memory::Memory> =\n"
+        "            Arc::new(zeroclaw_memory::NoneMemory::new(\"routed\"));\n"
+        "        let overrides = child_run_overrides(\n"
+        "            Arc::new(SecurityPolicy::default()),\n"
+        "            Some(routed),\n"
+        "            true,\n"
+        "        );\n"
+        "        assert!(overrides.memory_free);\n"
+        "        assert!(overrides.memory.is_none());\n"
+        "    }\n\n"
+        "    #[test]\n"
+        "    fn spawn_subagent_dyn_tool_implements_attributable() {\n",
+    )
+
+    old_test = (
+        "        ScopedToolRegistry::assemble_prepared(\n"
+        "            ScopedAssembly {\n"
+        "                config: &config,\n"
+        "                agent_alias: \"default\",\n"
+        "                security: &security,\n"
+        "                built,\n"
+        "                skills: &[],\n"
+        "                runtime: Arc::new(crate::platform::NativeRuntime::new()),\n"
+        "                caller_allowed: None,\n"
+        "                connect_mcp: false,\n"
+        "                connect_peripherals: false,\n"
+        "                exclude_memory: true,\n"
+        "                acp_delivery: false,\n"
+        "                list_deferred_mcp_specs: false,\n"
+        "                emit_assembly_logs: false,\n"
+        "                mcp_registry: None,\n"
+        "            },\n"
+        "            RegistryConstruction::SuppliedOnly,\n"
+        "            0..0,\n"
+        "        )\n"
+        "        .await;\n"
+        "        let names: Vec<_> = parent\n"
+        "            .read()\n"
+        "            .iter()\n"
+        "            .map(|tool| tool.name().to_string())\n"
+        "            .collect();\n"
+        "        assert_eq!(\n"
+        "            names,\n"
+        "            [\"calculator\"],\n"
+        "            \"memory tools leave a memory-free parent view\"\n"
+        "        );\n"
+    )
+    new_test = old_test.replace(
+        "        ScopedToolRegistry::assemble_prepared(\n",
+        "        let assembled = ScopedToolRegistry::assemble_prepared(\n",
+    ).replace(
+        "        let names: Vec<_> = parent\n",
+        "        let scoped_parent = assembled.delegate_handle.as_ref().unwrap();\n"
+        "        assert!(parent.read().iter().any(|tool| tool.name() == \"memory_store\"));\n"
+        "        let names: Vec<_> = scoped_parent\n",
+    ).replace(
+        "            \"memory tools leave a memory-free parent view\"\n",
+        "            \"memory tools leave the run-local parent view\"\n",
+    )
+    replace_required(scoped, old_test, new_test)
+
+    # Context-filtered assemblies now own a run-local view. Their tests must
+    # exercise late additions through that view and verify the caller's shared
+    # handle remains intact.
+    helper = """    fn attach_origin_handler_to_parent(
+        fixture: &OriginFixture,
+        parent_tools: &crate::tools::DelegateParentToolsHandle,
+        keep_native: bool,
+        name: &'static str,
+    ) -> (Arc<dyn Tool>, Arc<parking_lot::Mutex<Vec<String>>>) {
+        let calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let handler: Arc<dyn Tool> = Arc::new(OriginHandler {
+            name,
+            memory: Arc::clone(&fixture.memory.stores["caller"]),
+            calls: calls.clone(),
+        });
+        let mut parent = parent_tools.write();
+        if !keep_native {
+            parent.retain(|tool| fixture.delegate.parent_tools.origins.prove(tool).is_none());
+        }
+        parent.insert(0, Arc::clone(&handler));
+        (handler, calls)
+    }
+
+"""
+    replace_required(
+        delegate,
+        "    async fn dispatch_origin(fixture: &OriginFixture) -> ToolResult {\n",
+        helper + "    async fn dispatch_origin(fixture: &OriginFixture) -> ToolResult {\n",
+    )
+
+    # Update the three tests that deliberately assemble an excluded parent.
+    # Use small, named function blocks so upstream test additions remain visible.
+    for test_name in (
+        "bounded_parent_context_withdrawal_allows_unrelated_supplied_target",
+        "bounded_parent_context_preserves_actual_handle_and_late_source_dispatch",
+        "bounded_parent_gate_time_contract_keeps_trusted_late_unknown_name_visible",
+    ):
+        signature = f"    async fn {test_name}() {{"
+        text = delegate.read_text()
+        if text.count(signature) != 1:
+            raise RuntimeError(f"Upstream overlay drift: expected one {test_name}")
+        start = text.index(signature)
+        end = text.find("\n    #[tokio::test]", start)
+        if end == -1:
+            raise RuntimeError(f"Upstream overlay drift: {test_name} has no following test")
+        body = text[start:end]
+        body = body.replace(
+            "        let parent = fixture.delegate.parent_tools_handle();\n",
+            "        let original_parent = fixture.delegate.parent_tools_handle();\n",
+            1,
+        )
+        body = body.replace(
+            "        let source = parent\n",
+            "        let source = original_parent\n",
+            1,
+        )
+        if test_name == "bounded_parent_context_preserves_actual_handle_and_late_source_dispatch":
+            body = body.replace(
+                '        let (late, calls) = attach_origin_handler(&fixture, true, "source_probe");\n',
+                "",
+                1,
+            )
+        body = body.replace(
+            "        assert!(Arc::ptr_eq(\n            scoped.delegate_handle.as_ref().unwrap(),\n            &parent\n        ));\n",
+            "        assert!(!Arc::ptr_eq(\n            scoped.delegate_handle.as_ref().unwrap(),\n            &original_parent\n        ));\n"
+            "        let parent = Arc::clone(scoped.delegate_handle.as_ref().unwrap());\n",
+            1,
+        )
+        if test_name == "bounded_parent_context_preserves_actual_handle_and_late_source_dispatch":
+            body = body.replace(
+                "        let parent = Arc::clone(scoped.delegate_handle.as_ref().unwrap());\n",
+                "        let parent = Arc::clone(scoped.delegate_handle.as_ref().unwrap());\n"
+                '        let (late, calls) = attach_origin_handler_to_parent(&fixture, &parent, true, "source_probe");\n',
+                1,
+            )
+        if test_name == "bounded_parent_gate_time_contract_keeps_trusted_late_unknown_name_visible":
+            body = body.replace(
+                "        let scoped = scoped_origin_parent(&fixture, true).await;\n",
+                "        let scoped = scoped_origin_parent(&fixture, true).await;\n"
+                "        let parent = Arc::clone(scoped.delegate_handle.as_ref().unwrap());\n",
+                1,
+            )
+            body = body.replace(
+                'origin_fixture_with_parent_memory(false, false, true, false, "memory_store", true)',
+                'origin_fixture_with_parent_memory(false, false, true, false, "late_probe", true)',
+                1,
+            )
+            body = body.replace(
+                'attach_origin_handler_to_parent(&fixture, &parent, true, "memory_store")',
+                'attach_origin_handler_to_parent(&fixture, &parent, true, "late_probe")',
+                1,
+            )
+        body = body.replace(
+            "        assert!(\n            parent\n                .read()\n                .iter()\n                .all(|tool| !zeroclaw_tools::MEMORY_TOOL_NAMES.contains(&tool.name()))\n        );\n",
+            "        assert!(\n            parent\n                .read()\n                .iter()\n                .all(|tool| !zeroclaw_tools::MEMORY_TOOL_NAMES.contains(&tool.name()))\n        );\n"
+            "        assert!(original_parent.read().iter().any(|tool| tool.name() == \"memory_store\"));\n",
+            1,
+        )
+        body = body.replace(
+            "        let (late, calls) = attach_origin_handler(&fixture, true, \"source_probe\");\n",
+            "        let (late, calls) = attach_origin_handler_to_parent(\n            &fixture, &parent, true, \"source_probe\",\n        );\n",
+            1,
+        )
+        body = body.replace(
+            "        let (late, calls) = attach_origin_handler(&fixture, true, \"memory_store\");\n",
+            "        let (late, calls) = attach_origin_handler_to_parent(\n            &fixture, &parent, true, \"memory_store\",\n        );\n",
+            1,
+        )
+        if test_name == "bounded_parent_gate_time_contract_keeps_trusted_late_unknown_name_visible":
+            body = body.replace(
+                '            &fixture, &parent, true, "memory_store",\n',
+                '            &fixture, &parent, true, "late_probe",\n',
+                1,
+            )
+        if "assert!(Arc::ptr_eq(\n            scoped.delegate_handle.as_ref().unwrap()," in body:
+            raise RuntimeError(f"Upstream overlay drift: {test_name} shared-handle assertion")
+        delegate.write_text(text[:start] + body + text[end:])
+
+
+def project_enact_relay_dial_test_seam(source):
+    """Test connect cancellation/deadlines without OS-specific backlog limits."""
+    relay = source / "crates/zeroclaw-runtime/src/relay.rs"
+    replace_required(
+        relay,
+        "async fn bridge_conn(\n"
+        "    conn_id: u64,\n"
+        "    local_addr: &str,\n"
+        "    to_relay: mpsc::Sender<tokio_tungstenite::tungstenite::Message>,\n"
+        "    inbound: mpsc::Receiver<ConnMsg>,\n"
+        "    // Retires THIS conn: a child of the link token, so it fires both when the\n"
+        "    // relay closes this route and when the whole link dies.\n"
+        "    cancel: CancellationToken,\n"
+        "    conns: ConnMap,\n"
+        "    // Present only for enroll-routed conns: register our outbound source port\n"
+        "    // so the enrollment endpoint classifies this loopback peer as relay-routed.\n"
+        "    // A drop guard deregisters it however this task ends.\n"
+        "    bridge_ports: Option<crate::enroll::BridgePortSet>,\n"
+        ") {\n",
+        "async fn bridge_conn(\n"
+        "    conn_id: u64,\n"
+        "    local_addr: &str,\n"
+        "    to_relay: mpsc::Sender<tokio_tungstenite::tungstenite::Message>,\n"
+        "    inbound: mpsc::Receiver<ConnMsg>,\n"
+        "    cancel: CancellationToken,\n"
+        "    conns: ConnMap,\n"
+        "    bridge_ports: Option<crate::enroll::BridgePortSet>,\n"
+        ") {\n"
+        "    bridge_conn_with_dialer(\n"
+        "        conn_id, local_addr, to_relay, inbound, cancel, conns, bridge_ports,\n"
+        "        |socket, remote| socket.connect(remote),\n"
+        "    )\n"
+        "    .await;\n"
+        "}\n\n"
+        "async fn bridge_conn_with_dialer<F, Fut>(\n"
+        "    conn_id: u64,\n"
+        "    local_addr: &str,\n"
+        "    to_relay: mpsc::Sender<tokio_tungstenite::tungstenite::Message>,\n"
+        "    inbound: mpsc::Receiver<ConnMsg>,\n"
+        "    cancel: CancellationToken,\n"
+        "    conns: ConnMap,\n"
+        "    bridge_ports: Option<crate::enroll::BridgePortSet>,\n"
+        "    connect: F,\n"
+        ")\n"
+        "where\n"
+        "    F: FnOnce(tokio::net::TcpSocket, std::net::SocketAddr) -> Fut,\n"
+        "    Fut: std::future::Future<Output = std::io::Result<tokio::net::TcpStream>>,\n"
+        "{\n",
+    )
+    replace_required(
+        relay,
+        "            let dial = tokio::time::timeout(LOCAL_DIAL_DEADLINE, socket.connect(remote));\n",
+        "            let dial = tokio::time::timeout(LOCAL_DIAL_DEADLINE, connect(socket, remote));\n",
+    )
+    replace_required(
+        relay,
+        "    use tokio::net::{TcpListener, TcpStream};\n\n"
+        "    fn empty_port_set() -> crate::enroll::BridgePortSet {\n",
+        "    fn empty_port_set() -> crate::enroll::BridgePortSet {\n",
+    )
+    stalled_start = "    /// A loopback listener whose accept backlog is full and which never accepts,\n"
+    stalled_end = "    /// Drive one `bridge_conn` against `addr`, returning its task and the port\n"
+    text = relay.read_text()
+    if text.count(stalled_start) != 1 or text.count(stalled_end) != 1:
+        raise RuntimeError(f"Upstream overlay drift: relay test seam markers changed in {relay}")
+    start = text.index(stalled_start)
+    end = text.index(stalled_end, start)
+    relay.write_text(text[:start] + text[end:])
+    replace_required(
+        relay,
+        "                bridge_conn(\n"
+        "                    1,\n"
+        "                    &addr,\n"
+        "                    to_relay,\n"
+        "                    inbound_rx,\n"
+        "                    link_dead,\n"
+        "                    conns,\n"
+        "                    Some(ports),\n"
+        "                )\n"
+        "                .await;\n",
+        "                bridge_conn_with_dialer(\n"
+        "                    1,\n"
+        "                    &addr,\n"
+        "                    to_relay,\n"
+        "                    inbound_rx,\n"
+        "                    link_dead,\n"
+        "                    conns,\n"
+        "                    Some(ports),\n"
+        "                    |_socket, _remote| {\n"
+        "                        std::future::pending::<std::io::Result<tokio::net::TcpStream>>()\n"
+        "                    },\n"
+        "                )\n"
+        "                .await;\n",
+    )
+    replace_required(
+        relay,
+        "    /// Drive one `bridge_conn` against `addr`, returning its task and the port\n"
+        "    /// set it registers into.\n",
+        "    /// Drive one bridge dial with an injected pending connector and return\n"
+        "    /// its task and the port set it registers before connecting.\n",
+    )
+    replace_required(
+        relay,
+        "    async fn a_closed_route_releases_a_dial_parked_on_a_stalled_listener() {\n",
+        "    async fn a_closed_route_cancels_a_dial_parked_in_connect() {\n",
+    )
+    replace_required(
+        relay,
+        "        // The dial holds nothing but its own deadline now, so the budget is\n"
+        "        // spent by advancing the clock rather than by waiting on it.\n",
+        "        // The injected connector stays pending; advance the runtime clock to\n"
+        "        // verify the dial keeps its full budget before timing out.\n",
+    )
+    replace_count_required(
+        relay,
+        "        let (addr, _listener, _backlog) = stalled_listener().await;\n",
+        "        let addr = \"127.0.0.1:1\".to_string();\n",
+        2,
+    )
+
+
+def project_enact_installer_environment(source):
+    """Accept Enact's feature override while retaining the upstream alias."""
+    installer = source / "install.sh"
+    replace_required(
+        installer,
+        "  ZEROCLAW_CARGO_FEATURES  Extra cargo features (legacy; prefer --features)\n",
+        "  ENACT_AGENT_CARGO_FEATURES  Extra features (ZEROCLAW alias accepted)\n",
+    )
+    replace_required(
+        installer,
+        'takes no --features (or ZEROCLAW_CARGO_FEATURES); drop them, or leave out --cli-only to choose the features yourself',
+        'takes no --features or feature environment override; drop them, or leave out --cli-only to choose features yourself',
+    )
+    replace_required(
+        installer,
+        '# Support legacy env var\n'
+        'if [ -n "${ZEROCLAW_CARGO_FEATURES:-}" ]; then\n'
+        '  USER_FEATURES="${USER_FEATURES:+$USER_FEATURES,}$ZEROCLAW_CARGO_FEATURES"\n'
+        'fi\n',
+        '# Enact variable is public; keep the upstream name as a compatibility alias.\n'
+        'if [ -n "${ENACT_AGENT_CARGO_FEATURES:-}" ]; then\n'
+        '  USER_FEATURES="${USER_FEATURES:+$USER_FEATURES,}$ENACT_AGENT_CARGO_FEATURES"\n'
+        'fi\n'
+        'if [ -n "${ZEROCLAW_CARGO_FEATURES:-}" ]; then\n'
+        '  USER_FEATURES="${USER_FEATURES:+$USER_FEATURES,}$ZEROCLAW_CARGO_FEATURES"\n'
+        'fi\n',
+    )
+
+
+def project_enact_container_environment(source):
+    """Keep the Compose runtime overrides aligned with Enact's env prefix."""
+    compose = source / "docker-compose.yml"
+    replace_required(
+        compose,
+        "ZEROCLAW_gateway__host=0.0.0.0",
+        "ENACT_AGENT_gateway__host=0.0.0.0",
+    )
+    replace_required(
+        compose,
+        "ZEROCLAW_gateway__allow_public_bind=true",
+        "ENACT_AGENT_gateway__allow_public_bind=true",
+    )
+    replace_required(
+        compose,
+        "      - ZEROCLAW_gateway__port=${ZEROCLAW_GATEWAY_PORT:-42617}\n",
+        "      - ENACT_AGENT_gateway__port=${ENACT_AGENT_GATEWAY_PORT:-42617}\n",
+    )
+    replace_required(
+        compose,
+        "${ZEROCLAW_GATEWAY_PORT:-42617}",
+        "${ENACT_AGENT_GATEWAY_PORT:-42617}",
+    )
 
 
 def project_workspace_owned_agent_paths(source):
@@ -795,11 +3130,150 @@ def project_workspace_owned_agent_paths(source):
         if old not in exporter_text:
             raise RuntimeError(f"Upstream overlay drift: expected {old!r} in {exporter}")
         exporter_text = exporter_text.replace(old, new)
+    for old, new, expected_count in (
+        ('elsewhere/researcher/workspace/host.md', 'elsewhere/agents/researcher/host.md', 1),
+        ('researcher/workspace/host.md', 'agents/researcher/host.md', 4),
+        ('std::os::unix::fs::symlink(outside.path(), install.path().join("agents")).unwrap();',
+         'std::os::unix::fs::symlink(outside.path(), install.path().join("workspace")).unwrap();', 1),
+        ('            install.path().join("agents"),', '            install.path().join("workspace"),', 1),
+        ('let agents = install.path().join("agents");',
+         'let agents = install.path().join("workspace/agents");', 2),
+        ('let retired = install.path().join("agents-retired");',
+         'let retired = install.path().join("workspace/agents-retired");', 1),
+        ('vec!["agents".to_string()]', 'vec!["workspace".to_string()]', 1),
+        ('`<install>/agents` is a link out of the install.',
+         '`<install>/workspace` is a link out of the install.', 1),
+        ('The workspace flavor of the in-install redirect: `agents` points at a',
+         'The workspace flavor of the in-install redirect: `workspace` points at a', 1),
+        ('while the copy walks a tree the agents contract does not own.',
+         'while the copy walks a tree the workspace contract does not own.', 1),
+        ('the walk classifies `agents` as a\n    /// real directory',
+         'the walk classifies `workspace/agents` as a\n    /// real directory', 1),
+    ):
+        if exporter_text.count(old) != expected_count:
+            raise RuntimeError(
+                f"Upstream overlay drift: expected {expected_count} {old!r} in {exporter}"
+            )
+        exporter_text = exporter_text.replace(old, new)
     exporter.write_text(exporter_text)
     replace_required(
         source / "crates/zeroclaw-config/src/agent_bundle.rs",
         '"agents/researcher/workspace"',
         '"workspace/agents/researcher"',
+    )
+
+
+def project_enact_component_fixtures(source, brand):
+    """Align upstream integration fixtures with Enact's command and path contracts."""
+    export = source / "tests/component/agents_export_cli.rs"
+    replace_required(
+        export,
+        'install.path().join("agents/export_fixture/workspace")',
+        'install.path().join("workspace/agents/export_fixture")',
+    )
+    replace_required(
+        export,
+        '.join("agents/export_fixture/workspace/notes.md")',
+        '.join("workspace/agents/export_fixture/notes.md")',
+    )
+
+    ownership = source / "tests/component/config_patch_cli.rs"
+    command = brand["command"]
+    name = brand["name"]
+    for old, new in (
+        (
+            "Cannot run `zeroclaw agent` while another ZeroClaw process owns",
+            f"Cannot run `{command} agent` while another {name} process owns",
+        ),
+        (
+            "`zeroclaw agent --agent missing` is not configured",
+            f"`{command} agent --agent missing` is not configured",
+        ),
+        (
+            "Cannot run `zeroclaw acp` while another ZeroClaw process owns",
+            f"Cannot run `{command} acp` while another {name} process owns",
+        ),
+        ("while another ZeroClaw process owns", f"while another {name} process owns"),
+    ):
+        text = ownership.read_text()
+        if old not in text:
+            raise RuntimeError(f"Upstream overlay drift: expected {old!r} in {ownership}")
+        ownership.write_text(text.replace(old, new))
+
+    acp = source / "tests/component/acp_session_cwd_stdio.rs"
+    replace_count_required(
+        acp,
+        "<install-root>/agents/test-agent/workspace",
+        "<install-root>/workspace/agents/test-agent",
+        2,
+    )
+    replace_required(
+        acp,
+        'ws.ends_with("agents/test-agent/workspace")',
+        'ws.ends_with("workspace/agents/test-agent")',
+    )
+
+    cron = source / "tests/component/cron_help_examples.rs"
+    replace_count_required(
+        cron,
+        "zeroclaw cron",
+        f"{command} cron",
+        12,
+    )
+
+
+def project_enact_cli_command_strings(source, brand):
+    """Project remaining Enact CLI diagnostics and examples through Fluent."""
+    command = brand["command"]
+    name = brand["name"]
+    main = source / "src/main.rs"
+    replace_required(
+        main,
+        'format!(\n'
+        '                            "Cannot run `zeroclaw {command}` while another ZeroClaw process owns the config state at {}. Stop the owning process or use its daemon-backed interface, then retry. No agent work was started.",',
+        'format!(\n'
+        f'                            "Cannot run `{command} {{command}}` while another {name} process owns the config state at {{}}. Stop the owning process or use its daemon-backed interface, then retry. No agent work was started.",',
+    )
+    replace_required(
+        main,
+        'format!(\n'
+        '                            "Cannot run `zeroclaw daemon` while another ZeroClaw process owns the config state at {}. Stop the owning process or use its daemon-backed interface, then retry. No agent work was started.",',
+        'format!(\n'
+        f'                            "Cannot run `{command} daemon` while another {name} process owns the config state at {{}}. Stop the owning process or use its daemon-backed interface, then retry. No agent work was started.",',
+    )
+
+    alias_error = re.compile(
+        r'(?m)^(?P<indent>[ \t]*)anyhow::bail!\(\n'
+        r'(?P<inner_indent>[ \t]*)"`zeroclaw agent --agent \{agent_alias\}` is not configured '
+        r'\(no \[agents\.\{agent_alias\}\] entry\)"\n'
+        r'(?P=indent)\);'
+    )
+    text = main.read_text()
+    matches = list(alias_error.finditer(text))
+    if len(matches) != 2:
+        raise RuntimeError(
+            f"Upstream overlay drift: expected two agent alias CLI errors in {main}, found {len(matches)}"
+        )
+
+    def project_alias_error(match):
+        indent = match.group("indent")
+        inner = match.group("inner_indent")
+        return (
+            f'{indent}anyhow::bail!("{{}}", ta(\n'
+            f'{inner}"cli-enact-agent-alias-not-configured",\n'
+            f'{inner}&[("alias", &agent_alias)],\n'
+            f'{inner}format!("`{command} agent --agent {{agent_alias}}` is not configured '
+            f'(no [agents.{{agent_alias}}] entry)"),\n'
+            f'{indent}));'
+        )
+
+    main.write_text(alias_error.sub(project_alias_error, text))
+
+    cron = source / "src/cron/mod.rs"
+    replace_required(
+        cron,
+        '                println!("  zeroclaw cron add \'0 9 * * *\' \'echo ok\' --agent sentinel"); // i18n-exempt: literal command example',
+        '                println!("{}", get_required_cli_string("cli-enact-cron-empty-usage"));',
     )
 
 
@@ -1045,6 +3519,20 @@ def project_enact_agent_capabilities(source):
         raise RuntimeError(f"Upstream overlay drift: Enact capability test already exists at {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source / "overlays/enact/tests/builtin_capabilities.rs", target)
+
+    # This fixture describes the release feature graph. Keep it out of the
+    # default workspace test run, which intentionally omits tools-external.
+    cargo_toml = source / "Cargo.toml"
+    cargo_text = cargo_toml.read_text()
+    if 'name = "enact_builtin_capabilities"' in cargo_text:
+        raise RuntimeError("Upstream overlay drift: Enact capability test target is already configured")
+    cargo_toml.write_text(
+        cargo_text.rstrip()
+        + '\n\n[[test]]\n'
+        'name = "enact_builtin_capabilities"\n'
+        'path = "tests/enact_builtin_capabilities.rs"\n'
+        'required-features = ["agent-runtime", "tools-external"]\n'
+    )
 
 
 def project_enact_mcp_server(source):
@@ -1999,6 +4487,7 @@ def project_enact_tool_families(source):
         "    let tools = native_memory.wrap_actual_tools(&tool_arcs);\n"
         "    Ok(AllToolsResult {\n",
     )
+    project_enact_family_early_return(source)
 
     # ── the one-time deprecation notice ─────────────────────────────────
     tool_execution = source / "crates/zeroclaw-runtime/src/agent/tool_execution.rs"
@@ -2052,7 +4541,6 @@ def project_enact_tool_families(source):
         "                        output_data,\n"
         "                    })\n",
     )
-
     # ── the MCP surface renders the notice beside the body ─────────────
     # The notice support is baked into the overlay-owned MCP module, not
     # patched into it here: the module is ours, so it ships in final form.
@@ -2082,40 +4570,300 @@ def project_enact_tool_families(source):
     )
 
     # ── the model sees the family, not the members ───────────────────────
-    # The members stay in the registry: a config, a script, or a model that
-    # remembers the old name can still call them, and the call carries a
-    # one-time notice. What the model is *offered* is the family, so the
-    # consolidation actually removes the thirty-six entries from the tool
-    # list instead of adding ten to it.
-    replace_required(
-        source / "crates/zeroclaw-runtime/src/agent/turn/tool_specs.rs",
-        "    let mut tool_specs: Vec<crate::tools::ToolSpec> = tools_registry\n"
-        "        .iter()\n"
-        "        .filter(|tool| !excluded_tools.iter().any(|ex| ex == tool.name()))\n",
-        "    let mut tool_specs: Vec<crate::tools::ToolSpec> = tools_registry\n"
-        "        .iter()\n"
-        "        .filter(|tool| !excluded_tools.iter().any(|ex| ex == tool.name()))\n"
-    )
+    # The members stay in the runtime registry: an older model call remains
+    # parseable and dispatchable, and carries a one-time notice. The provider
+    # request advertises each available family in place of its members.
+    project_enact_family_request_specs(source)
 
     # ── a family is offered only while one of its members is ─────────────
     project_enact_family_scope_filter(source)
 
-    # ── the family tools that need a live server to exist ────────────────
-    # The `mcp` family collapses `mcp_resources` and `mcp_prompts`, which are
-    # only built when MCP is enabled and a server advertises something. The
-    # family therefore cannot be constructed in a maximal-config unit test,
-    # for the same reason upstream allowlists `tool_search`.
+    # `mcp_resources` and `mcp_prompts` are minted later, after an MCP server
+    # connects and its access policy is applied. Their family must be built at
+    # that same boundary or those two names remain model-visible.
+    project_enact_contextual_mcp_family(source)
+
+    project_enact_family_delegate_tests(source)
+
+
+def project_enact_family_early_return(source):
+    """Keep early factory exits on the same canonical family surface."""
+    runtime_tools = source / "crates/zeroclaw-runtime/src/tools/mod.rs"
     replace_required(
-        source / "crates/zeroclaw-runtime/src/tools/mod.rs",
-        '        let unconstructible = std::collections::BTreeMap::from([(\n'
-        '            "tool_search",\n',
-        '        let unconstructible = std::collections::BTreeMap::from([(\n'
-        '            "mcp",\n'
-        '            "the family collapses `mcp_resources` and `mcp_prompts`, which are \\\n'
-        '             built only when MCP is enabled and a connected server advertises \\\n'
-        '             at least one tool",\n'
-        '        ), (\n'
-        '            "tool_search",\n',
+        runtime_tools,
+        "                let tools = native_memory.wrap_actual_tools(&tool_arcs);\n"
+        "                return Ok(AllToolsResult {\n",
+        "                // Match the normal registry path before returning: an early\n"
+        "                // configuration failure must not fall back to legacy names.\n"
+        "                for (family_name, family_tool) in crate::tools::families::build_all(&tool_arcs) {\n"
+        "                    register_builtin_tool(\n"
+        "                        &root_config.tools,\n"
+        "                        &mut tool_arcs,\n"
+        "                        &mut reserved_host_names,\n"
+        "                        family_name,\n"
+        "                        || Arc::new(family_tool),\n"
+        "                    );\n"
+        "                }\n"
+        "                let tools = native_memory.wrap_actual_tools(&tool_arcs);\n"
+        "                return Ok(AllToolsResult {\n",
+    )
+
+
+def project_enact_family_request_specs(source):
+    """Hide available family members from provider-facing tool specs.
+
+    Keep the complete specs in the runtime list for parsing, compatibility,
+    and dispatch. Only the provider-facing projection drops legacy member
+    names, and only when their canonical family was actually registered.
+    """
+    target = source / "crates/zeroclaw-runtime/src/agent/turn/tool_specs.rs"
+    replace_required(
+        target,
+        "    let mut hidden_builtin_names = HashSet::new();\n",
+        "    // Legacy family tools remain in `tool_specs` for parsing and dispatch,\n"
+        "    // but providers learn the canonical family name. Do not hide a member\n"
+        "    // unless its family tool was actually registered in this build.\n"
+        "    let mut hidden_builtin_names: HashSet<String> = crate::tools::families::FAMILIES\n"
+        "        .iter()\n"
+        "        .filter(|family| {\n"
+        "            tool_specs\n"
+        "                .iter()\n"
+        "                .any(|spec| spec.name.as_str() == family.name)\n"
+        "        })\n"
+        "        .flat_map(|family| family.members.iter().map(|member| (*member).to_string()))\n"
+        "        .collect();\n",
+    )
+    replace_required(
+        target,
+        "            hidden_builtin_names = activated_tools.hidden_builtin_names();\n",
+        "            hidden_builtin_names.extend(activated_tools.hidden_builtin_names());\n",
+    )
+
+    # Exercise the generated runtime projection itself. This test is injected
+    # into the prepared upstream module so the behavior stays fork-only.
+    replace_required(
+        target,
+        "    #[test]\n    fn deferred_builtin_request_projection_preserves_callable_names_and_exclusions() {\n",
+        "    #[test]\n"
+        "    fn family_request_projection_hides_members_but_keeps_them_callable() {\n"
+        "        let invocations = Arc::new(AtomicUsize::new(0));\n"
+        "        let registry: Vec<Box<dyn Tool>> = crate::tools::families::FAMILIES\n"
+        "            .iter()\n"
+        "            .flat_map(|family| {\n"
+        "                let mut family_tools: Vec<Box<dyn Tool>> = vec![Box::new(\n"
+        "                    CountingTool::new(family.name, Arc::clone(&invocations)),\n"
+        "                )];\n"
+        "                family_tools.extend(family.members.iter().map(|member| {\n"
+        "                    let tool: Box<dyn Tool> = Box::new(CountingTool::new(\n"
+        "                        *member,\n"
+        "                        Arc::clone(&invocations),\n"
+        "                    ));\n"
+        "                    tool\n"
+        "                }));\n"
+        "                family_tools\n"
+        "            })\n"
+        "            .collect();\n"
+        "        let specs = build_iteration_tool_specs(\n"
+        "            &NativeToolsProvider,\n"
+        "            \"test-model\",\n"
+        "            &registry,\n"
+        "            &[],\n"
+        "            None,\n"
+        "        )\n"
+        "        .expect(\"family tool specs should build\");\n"
+        "\n"
+        "        let requested: Vec<_> = specs\n"
+        "            .request_tool_specs()\n"
+        "            .iter()\n"
+        "            .map(|spec| spec.name.as_str())\n"
+        "            .collect();\n"
+        "        assert_eq!(requested.len(), crate::tools::families::FAMILIES.len());\n"
+        "        assert_eq!(specs.tool_specs.len(), 46);\n"
+        "        for family in crate::tools::families::FAMILIES {\n"
+        "            assert!(requested.contains(&family.name));\n"
+        "            for member in family.members {\n"
+        "                assert!(!requested.contains(member));\n"
+        "                assert!(specs.tool_specs.iter().any(|spec| spec.name == *member));\n"
+        "                assert!(specs.known_tool_names.contains(*member));\n"
+        "            }\n"
+        "        }\n"
+        "\n"
+        "        let legacy_only: Vec<Box<dyn Tool>> = vec![Box::new(CountingTool::new(\n"
+        "            \"cron_add\",\n"
+        "            invocations,\n"
+        "        ))];\n"
+        "        let without_family = build_iteration_tool_specs(\n"
+        "            &NativeToolsProvider,\n"
+        "            \"test-model\",\n"
+        "            &legacy_only,\n"
+        "            &[],\n"
+        "            None,\n"
+        "        )\n"
+        "        .expect(\"legacy-only tool specs should build\");\n"
+        "        assert_eq!(\n"
+        "            without_family.request_tool_specs()[0].name,\n"
+        "            \"cron_add\"\n"
+        "        );\n"
+        "    }\n"
+        "\n"
+        "    #[test]\n    fn deferred_builtin_request_projection_preserves_callable_names_and_exclusions() {\n",
+    )
+
+
+def project_enact_contextual_mcp_family(source):
+    """Build the MCP family from the capability tools admitted at runtime."""
+    scoped = source / "crates/zeroclaw-runtime/src/tools/scoped.rs"
+    if "Build their canonical family from exactly those admitted" in scoped.read_text():
+        raise RuntimeError(f"Upstream overlay drift: the MCP family is already projected in {scoped}")
+    replace_required(
+        scoped,
+        "                pinned_blocks = tools::mcp_context::build_pinned_resource_blocks(\n",
+        "                // The generic MCP resource and prompt tools are created only\n"
+        "                // after a server connects and the MCP policy admits them.\n"
+        "                // Build their canonical family from exactly those admitted\n"
+        "                // tools, so denied actions cannot enter the family schema.\n"
+        "                if let Some(family) = crate::tools::families::family_by_name(\"mcp\") {\n"
+        "                    let members: Vec<Arc<dyn Tool>> = tools_registry\n"
+        "                        .iter()\n"
+        "                        .filter_map(|(_, slot)| match slot {\n"
+        "                            BuildSlot::Ready(tool)\n"
+        "                                if family.members.contains(&tool.name()) =>\n"
+        "                            {\n"
+        "                                Some(Arc::clone(tool))\n"
+        "                            }\n"
+        "                            _ => None,\n"
+        "                        })\n"
+        "                        .filter(|tool| {\n"
+        "                            !security.is_tool_excluded(family.name)\n"
+        "                                && !security.is_tool_excluded(tool.name())\n"
+        "                                && (security.is_tool_allowed(tool.name())\n"
+        "                                    || security.is_tool_allowed(family.name))\n"
+        "                                && caller_allowed.is_none_or(|allowed| {\n"
+        "                                    allowed.iter().any(|name| {\n"
+        "                                        name == family.name || name == tool.name()\n"
+        "                                    })\n"
+        "                                })\n"
+        "                                && (caller_allowed.is_none()\n"
+        "                                    || !tool.requires_unrestricted_principal())\n"
+        "                        })\n"
+        "                        .collect();\n"
+        "                    if let Some(family_tool) =\n"
+        "                        crate::tools::families::FamilyTool::build(family, members)\n"
+        "                    {\n"
+        "                        let family_tool: Arc<dyn Tool> = Arc::new(family_tool);\n"
+        "                        if let Some(parent) = delegate_handle.as_ref() {\n"
+        "                            let mut parent = parent.write();\n"
+        "                            if !parent\n"
+        "                                .iter()\n"
+        "                                .any(|existing| existing.name() == family_tool.name())\n"
+        "                            {\n"
+        "                                parent.push(Arc::clone(&family_tool));\n"
+        "                            }\n"
+        "                        }\n"
+        "                        tools_registry.push(BuildSlot::Ready(family_tool));\n"
+        "                    }\n"
+        "                }\n"
+        "                pinned_blocks = tools::mcp_context::build_pinned_resource_blocks(\n",
+    )
+    replace_required(
+        scoped,
+        "        for expected in [\n            \"remote__echo\",\n",
+        "        assert!(\n"
+        "            eager_names.iter().any(|name| name == \"mcp\"),\n"
+        "            \"eager MCP assembly must expose the canonical capability family: {eager_names:?}\"\n"
+        "        );\n"
+        "        assert!(\n"
+        "            deferred_names.iter().any(|name| name == \"mcp\"),\n"
+        "            \"deferred MCP assembly must expose the canonical capability family: {deferred_names:?}\"\n"
+        "        );\n"
+        "        for expected in [\n            \"remote__echo\",\n",
+    )
+
+
+def project_enact_family_delegate_tests(source):
+    """Keep upstream provider-catalog assertions aligned with tool families."""
+    delegate = source / "crates/zeroclaw-runtime/src/tools/delegate.rs"
+    old = '''        assert!(offered_tool(&requests[1], "sessions_current"));
+    }
+
+    #[tokio::test]
+    async fn withheld_session_tools_do_not_reach_delegate_children() {
+'''
+    new = '''        assert!(offered_tool(&requests[1], "sessions"));
+    }
+
+    #[tokio::test]
+    async fn withheld_session_tools_do_not_reach_delegate_children() {
+'''
+    replace_required(delegate, old, new)
+
+    old = '''        for name in ["sessions_history", "spawn_subagent"] {
+            assert!(
+                offered_tool(&requests[0], name),
+                "control: an independent grandchild that withholds nothing is offered {name}"
+            );
+        }
+'''
+    new = '''        for name in ["sessions", "spawn_subagent"] {
+            assert!(
+                offered_tool(&requests[0], name),
+                "control: an independent grandchild that withholds nothing is offered {name}"
+            );
+        }
+'''
+    replace_required(delegate, old, new)
+
+    old = '''        assert!(offered_tool(&requests[1], "sessions_current"));
+    }
+
+    /// Captures the system prompt the nested independent loop receives and the
+'''
+    new = '''        assert!(offered_tool(&requests[1], "sessions"));
+    }
+
+    /// Captures the system prompt the nested independent loop receives and the
+'''
+    replace_required(delegate, old, new)
+
+    composition = source / "tests/fixtures/runtime-composition-consumer/src/lib.rs"
+    replace_required(
+        composition,
+        'first.iter().any(|name| name == "sessions_list")',
+        'first.iter().any(|name| name == "sessions")',
+    )
+
+
+def project_enact_provider_proxy_test_isolation(source):
+    """Keep local OpenAI HTTP tests isolated from process-global proxy state."""
+    openai = source / "crates/zeroclaw-providers/src/openai.rs"
+    replace_required(
+        openai,
+        "    async fn wire_body(\n"
+        "        wire: u8,\n"
+        "        streaming: bool,\n"
+        "        policy: Option<ToolRoundPolicy>,\n"
+        "        tool_shape: u8,\n"
+        "    ) -> serde_json::Value {\n"
+        "        let captured = Arc::new(Mutex::new(None));\n",
+        "    async fn wire_body(\n"
+        "        wire: u8,\n"
+        "        streaming: bool,\n"
+        "        policy: Option<ToolRoundPolicy>,\n"
+        "        tool_shape: u8,\n"
+        "    ) -> serde_json::Value {\n"
+        "        let _proxy_guard = crate::RuntimeProxyTestGuard::acquire().await;\n"
+        "        let captured = Arc::new(Mutex::new(None));\n",
+    )
+    replace_required(
+        openai,
+        "    async fn responses_model_listing_carries_header_only_profile_and_surfaces_auth_failure() {\n"
+        "        use axum::{Json, Router, extract::Request, http::StatusCode, routing::get};\n"
+        "        use tokio::net::TcpListener;\n",
+        "    async fn responses_model_listing_carries_header_only_profile_and_surfaces_auth_failure() {\n"
+        "        use axum::{Json, Router, extract::Request, http::StatusCode, routing::get};\n"
+        "        use tokio::net::TcpListener;\n"
+        "\n"
+        "        let _proxy_guard = crate::RuntimeProxyTestGuard::acquire().await;\n",
     )
 
 
@@ -3526,14 +6274,21 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
     project_enact_hooks_docs(SOURCE)
     project_enact_context_tools(SOURCE)
     project_enact_tool_families(SOURCE)
+    project_enact_excluded_memory_isolation(SOURCE)
+    project_enact_memory_free_parent_scope(SOURCE)
+    project_enact_relay_dial_test_seam(SOURCE)
+    project_enact_provider_proxy_test_isolation(SOURCE)
     project_enact_coordination(SOURCE)
     project_enact_turn_control(SOURCE)
+    project_enact_upstream_clippy_fixes(SOURCE)
     project_enact_plugin_hooks(SOURCE)
     project_enact_branding_consistency(SOURCE)
     project_enact_builtin_selection_fixture(SOURCE)
     project_enact_matrix_safe_policy(SOURCE)
     project_enact_agent_capabilities(SOURCE)
     project_enact_config_dir_branding(SOURCE)
+    project_enact_installer_environment(SOURCE)
+    project_enact_container_environment(SOURCE)
 
     # Retain Fluent keys, placeholders, URLs, config paths and crate identities.
     # Only the existing product literal and bare command examples are projected.
@@ -3549,6 +6304,18 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
             f"cli-enact-agent-identity = You are {brand['name']}, a fast and efficient AI assistant built in Rust. Be helpful, concise, and direct.\n"
             "cli-enact-updates-disabled = This branded distribution cannot install upstream release binaries. Pull upstream changes into your branding branch and rebuild with python3 overlays/enact/build.py package.\n"
             "cli-enact-desktop-build = Build the branded desktop app with python3 overlays/enact/build.py desktop. Upstream desktop downloads do not include this overlay.\n"
+            f"cli-enact-mcp-serving = [{brand['command']}] serving {{ $count }} tools for agent {{ $agent }} (workspace {{ $workspace }})\n"
+            f"cli-enact-mcp-empty-policy = [{brand['command']}] the agent's policy exposes no tools; the host will see an empty registry\n"
+            f"cli-enact-mcp-default-policy = [{brand['command']}] no configured agent supplied a risk profile; using the default supervised, workspace-only policy\n"
+            "cli-enact-mcp-hosts-heading = MCP servers configured for the coding hosts:\n"
+            "cli-enact-mcp-host-row =   { $name }  { $source }  { $target }\n"
+            "cli-enact-mcp-hosts-none =   (none found)\n"
+            "cli-enact-mcp-hosts-summary =   { $count } server(s): { $names }\n"
+            "cli-enact-mcp-hosts-enact-missing =   note: no server named 'enact' is registered; run `enact-agent mcp serve` and add it to the host\n"
+            f"cli-enact-mcp-http-listening = [{brand['command']}] MCP HTTP transport listening on http://{{ $address }}\n"
+            f"cli-enact-mcp-http-connection-failed = [{brand['command']}] MCP HTTP connection failed: {{ $error }}\n"
+            f"cli-enact-agent-alias-not-configured = `{brand['command']} agent --agent {{ $alias }}` is not configured (no [agents.{{ $alias }}] entry)\n"
+            f"cli-enact-cron-empty-usage =   {brand['command']} cron add '0 9 * * *' 'echo ok' --agent sentinel\n"
         )
     replace_required(SOURCE / "src/main.rs", '#[command(name = "zeroclaw")]',
                      f'#[command(name = "{brand["command"]}", bin_name = "{brand["command"]}")]')
@@ -3583,10 +6350,13 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
     # Disk catalogues override built-ins. Project their source before Fluent
     # parsing so existing/fetched translations cannot restore upstream branding;
     # user-supplied Fluent arguments are never rewritten.
+    replace_required(i18n, "    let search_paths = [path];\n    for path in search_paths.into_iter().flatten() {",
+                     '    let search_paths = [path];\n'
+                     '    // Invariant: this static pattern contains no user input and is valid.\n'
+                     '    let command = regex::Regex::new(r"(^|[^\\w./-])zeroclaw([ `])")\n'
+                     '        .expect("static branding regex is valid");\n'
+                     '    for path in search_paths.into_iter().flatten() {')
     replace_required(i18n, "            return Some(content);",
-                     '            // Invariant: this static pattern contains no user input and is valid.\n'
-                     '            let command = regex::Regex::new(r"(^|[^\\w./-])zeroclaw([ `])")\n'
-                     '                .expect("static branding regex is valid");\n'
                      f'            return Some(command.replace_all(&content, "${{1}}{brand["command"]}${{2}}")\n'
                      f'                .into_owned().replace("ZeroClaw", "{brand["name"]}"));')
     daemon = SOURCE / "crates/zeroclaw-runtime/src/daemon/mod.rs"
@@ -3643,6 +6413,8 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
     project_clap_docs(brand)
     project_environment(SOURCE)
     project_workspace_owned_agent_paths(SOURCE)
+    project_enact_cli_command_strings(SOURCE, brand)
+    project_enact_component_fixtures(SOURCE, brand)
     project_session_tools(SOURCE)
     project_tool_result_status(SOURCE)
     # The advertised tool set is derived, so it is checked against the tree

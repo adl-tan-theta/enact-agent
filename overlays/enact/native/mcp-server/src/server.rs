@@ -5,6 +5,10 @@
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use zeroclaw_api::jsonrpc::{
+    JSONRPC_VERSION, JsonRpcError, JsonRpcFrame, JsonRpcFrameError, JsonRpcFrameErrorKind,
+    JsonRpcResponse, error_codes,
+};
 
 use crate::mcp_server::protocol::{
     negotiate_protocol_version, str_field, tool_error, tool_result, tool_result_with_notice,
@@ -16,6 +20,48 @@ use crate::mcp_server::surface::{DEFAULT_SEARCH_LIMIT, ToolSurface};
 pub const SEARCH_TOOL: &str = "mcp_search";
 /// The canonical call tool name.
 pub const CALL_TOOL: &str = "mcp_call";
+
+fn success_response(id: Value, result: Value) -> JsonRpcResponse {
+    JsonRpcResponse {
+        jsonrpc: JSONRPC_VERSION,
+        result: Some(result),
+        error: None,
+        id,
+    }
+}
+
+fn error_response(id: Value, code: i32, message: impl Into<String>) -> JsonRpcResponse {
+    JsonRpcResponse {
+        jsonrpc: JSONRPC_VERSION,
+        result: None,
+        error: Some(JsonRpcError {
+            code,
+            message: message.into(),
+            data: None,
+        }),
+        id,
+    }
+}
+
+fn invalid_request_response(error: JsonRpcFrameError) -> Option<JsonRpcResponse> {
+    if error.kind() == JsonRpcFrameErrorKind::Response {
+        return None;
+    }
+
+    Some(error_response(
+        error.request_id().cloned().unwrap_or(Value::Null),
+        error_codes::INVALID_REQUEST,
+        format!("invalid request: {error}"),
+    ))
+}
+
+pub(crate) fn parse_error_response(error: &str) -> JsonRpcResponse {
+    error_response(
+        Value::Null,
+        error_codes::PARSE_ERROR,
+        format!("parse error: {error}"),
+    )
+}
 
 /// How much of the registry the host sees.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,47 +149,42 @@ impl McpServer {
     /// Handle one JSON-RPC message.
     ///
     /// Returns `None` for notifications, which never get a response.
-    pub async fn handle(&self, message: Value) -> Option<Value> {
-        let method = message
-            .get("method")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let id = message.get("id").cloned();
-        let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
-
-        let Some(method) = method else {
-            return Some(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": -32600, "message": "invalid request: missing method" }
-            }));
+    pub async fn handle(&self, message: Value) -> Option<JsonRpcResponse> {
+        let request = match JsonRpcFrame::from_value(message) {
+            Ok(JsonRpcFrame::Request(request)) => request,
+            Ok(JsonRpcFrame::Response { .. }) => return None,
+            Err(error) => return invalid_request_response(error),
+        };
+        let method = request.method;
+        let id = request.id;
+        let params = if request.params.is_null() {
+            json!({})
+        } else {
+            request.params
         };
 
         let result = match method.as_str() {
             "initialize" => Ok(self.initialize(&params)),
             "notifications/initialized" | "initialized" => return None,
-            "ping" => Ok(json!({})),
+            "ping" | "logging/setLevel" => Ok(json!({})),
             "tools/list" => Ok(self.list_tools()),
             "tools/call" => Ok(self.call_tool(&params).await),
             "prompts/list" => Ok(json!({ "prompts": [] })),
             "resources/list" => Ok(json!({ "resources": [] })),
             "resources/templates/list" => Ok(json!({ "resourceTemplates": [] })),
-            "logging/setLevel" => Ok(json!({})),
             other => Err(other.to_string()),
         };
 
         // A notification carries no id and never gets a response.
-        let Some(id) = id else {
-            return None;
-        };
+        let id = id?;
 
         match result {
-            Ok(result) => Some(json!({ "jsonrpc": "2.0", "id": id, "result": result })),
-            Err(method) => Some(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": -32601, "message": format!("method not found: {method}") }
-            })),
+            Ok(result) => Some(success_response(id, result)),
+            Err(method) => Some(error_response(
+                id,
+                error_codes::METHOD_NOT_FOUND,
+                format!("method not found: {method}"),
+            )),
         }
     }
 
@@ -239,10 +280,9 @@ impl McpServer {
         if let (Some(action), Some(object)) = (
             str_field(arguments, "action"),
             call_arguments.as_object_mut(),
-        ) {
-            if self.declares_action(tool) {
-                object.insert("action".to_string(), json!(action));
-            }
+        ) && self.declares_action(tool)
+        {
+            object.insert("action".to_string(), json!(action));
         }
         self.execute(tool, call_arguments).await
     }
@@ -269,10 +309,7 @@ impl McpServer {
                     .and_then(|data| data.get("deprecation"))
                     .cloned();
                 let mut body = payload.clone();
-                if let Some(object) = body
-                    .get_mut("data")
-                    .and_then(|data| data.as_object_mut())
-                {
+                if let Some(object) = body.get_mut("data").and_then(|data| data.as_object_mut()) {
                     object.remove("deprecation");
                 }
                 let text = body.to_string();
@@ -310,14 +347,10 @@ pub async fn serve_stdio(server: McpServer) -> anyhow::Result<()> {
         }
         let response = match serde_json::from_str::<Value>(trimmed) {
             Ok(message) => server.handle(message).await,
-            Err(error) => Some(json!({
-                "jsonrpc": "2.0",
-                "id": Value::Null,
-                "error": { "code": -32700, "message": format!("parse error: {error}") }
-            })),
+            Err(error) => Some(parse_error_response(&error.to_string())),
         };
         if let Some(response) = response {
-            writer.write_all(response.to_string().as_bytes()).await?;
+            writer.write_all(&serde_json::to_vec(&response)?).await?;
             writer.write_all(b"\n").await?;
             writer.flush().await?;
         }
@@ -372,18 +405,26 @@ mod tests {
         McpServer::new(surface, expose)
     }
 
+    async fn handle(server: McpServer, message: Value) -> Option<Value> {
+        server.handle(message).await.map(|response| {
+            serde_json::to_value(response).expect("JSON-RPC response is serializable")
+        })
+    }
+
     #[tokio::test]
     async fn initialize_advertises_the_protocol() {
-        let response = server(Expose::Minimal)
-            .handle(json!({
+        let response = handle(
+            server(Expose::Minimal),
+            json!({
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "initialize",
                 "params": { "protocolVersion": "2024-11-05", "capabilities": {},
                             "clientInfo": { "name": "codex-cli", "version": "1" } }
-            }))
-            .await
-            .unwrap();
+            }),
+        )
+        .await
+        .unwrap();
         assert_eq!(response["result"]["protocolVersion"], json!("2024-11-05"));
         assert!(response["result"]["capabilities"]["tools"].is_object());
         assert_eq!(
@@ -394,32 +435,38 @@ mod tests {
 
     #[tokio::test]
     async fn initialize_echoes_a_known_newer_protocol() {
-        let response = server(Expose::Minimal)
-            .handle(json!({
+        let response = handle(
+            server(Expose::Minimal),
+            json!({
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",
                 "params": { "protocolVersion": "2025-06-18" }
-            }))
-            .await
-            .unwrap();
+            }),
+        )
+        .await
+        .unwrap();
         assert_eq!(response["result"]["protocolVersion"], json!("2025-06-18"));
     }
 
     #[tokio::test]
     async fn notifications_get_no_response() {
         assert!(
-            server(Expose::Minimal)
-                .handle(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
-                .await
-                .is_none()
+            handle(
+                server(Expose::Minimal),
+                json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+            )
+            .await
+            .is_none()
         );
     }
 
     #[tokio::test]
     async fn minimal_surface_lists_two_tools() {
-        let response = server(Expose::Minimal)
-            .handle(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }))
-            .await
-            .unwrap();
+        let response = handle(
+            server(Expose::Minimal),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+        )
+        .await
+        .unwrap();
         let tools = response["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 2);
         assert_eq!(tools[0]["name"], json!(SEARCH_TOOL));
@@ -428,10 +475,12 @@ mod tests {
 
     #[tokio::test]
     async fn full_surface_lists_the_registry() {
-        let response = server(Expose::Full)
-            .handle(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }))
-            .await
-            .unwrap();
+        let response = handle(
+            server(Expose::Full),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+        )
+        .await
+        .unwrap();
         let tools = response["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 3);
         assert_eq!(tools[2]["name"], json!("file_read"));
@@ -439,32 +488,38 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_method_is_an_error() {
-        let response = server(Expose::Minimal)
-            .handle(json!({ "jsonrpc": "2.0", "id": 3, "method": "nope" }))
-            .await
-            .unwrap();
+        let response = handle(
+            server(Expose::Minimal),
+            json!({ "jsonrpc": "2.0", "id": 3, "method": "nope" }),
+        )
+        .await
+        .unwrap();
         assert_eq!(response["error"]["code"], json!(-32601));
     }
 
     #[tokio::test]
     async fn search_then_call_round_trip() {
-        let found = server(Expose::Minimal)
-            .handle(json!({
+        let found = handle(
+            server(Expose::Minimal),
+            json!({
                 "jsonrpc": "2.0", "id": 4, "method": "tools/call",
                 "params": { "name": SEARCH_TOOL, "arguments": { "query": "read a file" } }
-            }))
-            .await
-            .unwrap();
+            }),
+        )
+        .await
+        .unwrap();
         assert_eq!(found["result"]["isError"], json!(false));
 
-        let called = server(Expose::Minimal)
-            .handle(json!({
+        let called = handle(
+            server(Expose::Minimal),
+            json!({
                 "jsonrpc": "2.0", "id": 5, "method": "tools/call",
                 "params": { "name": CALL_TOOL, "arguments": { "tool": "file_read",
                           "arguments": { "path": "x" } } }
-            }))
-            .await
-            .unwrap();
+            }),
+        )
+        .await
+        .unwrap();
         assert_eq!(called["result"]["isError"], json!(false));
         assert!(
             called["result"]["content"][0]["text"]
@@ -476,25 +531,59 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_tool_is_reported_in_the_result_body() {
-        let response = server(Expose::Minimal)
-            .handle(json!({
+        let response = handle(
+            server(Expose::Minimal),
+            json!({
                 "jsonrpc": "2.0", "id": 6, "method": "tools/call",
                 "params": { "name": CALL_TOOL, "arguments": { "tool": "nope" } }
-            }))
-            .await
-            .unwrap();
+            }),
+        )
+        .await
+        .unwrap();
         assert_eq!(response["result"]["isError"], json!(true));
     }
 
     #[tokio::test]
     async fn a_registry_tool_can_be_called_directly() {
-        let response = server(Expose::Full)
-            .handle(json!({
+        let response = handle(
+            server(Expose::Full),
+            json!({
                 "jsonrpc": "2.0", "id": 7, "method": "tools/call",
                 "params": { "name": "file_read", "arguments": { "path": "x" } }
-            }))
-            .await
-            .unwrap();
+            }),
+        )
+        .await
+        .unwrap();
         assert_eq!(response["result"]["isError"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn malformed_requests_use_the_shared_jsonrpc_error_shape() {
+        let response = handle(
+            server(Expose::Minimal),
+            json!({ "jsonrpc": "1.0", "id": 8, "method": "ping" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response["id"], json!(8));
+        assert_eq!(response["error"]["code"], json!(-32600));
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("2.0")
+        );
+    }
+
+    #[tokio::test]
+    async fn incoming_response_frames_are_dropped_without_reply() {
+        assert!(
+            handle(
+                server(Expose::Minimal),
+                json!({ "jsonrpc": "2.0", "id": 9, "result": {} }),
+            )
+            .await
+            .is_none()
+        );
     }
 }

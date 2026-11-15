@@ -82,7 +82,10 @@ pub fn str_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
 
 /// Read an unsigned integer field from a JSON object.
 pub fn usize_field(value: &Value, key: &str) -> Option<usize> {
-    value.get(key).and_then(Value::as_u64).map(|n| n as usize)
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok())
 }
 
 #[cfg(test)]

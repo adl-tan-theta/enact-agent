@@ -12,11 +12,13 @@
 
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use anyhow::Context as _;
+use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use zeroclaw_api::jsonrpc::JsonRpcResponse;
 
-use crate::mcp_server::server::McpServer;
+use crate::mcp_server::server::{McpServer, parse_error_response};
 
 /// The default port the HTTP transport binds.
 pub const DEFAULT_HTTP_PORT: u16 = 7781;
@@ -33,19 +35,28 @@ pub async fn serve_http(server: McpServer, host: &str, port: u16) -> anyhow::Res
     let address = format!("{host}:{port}");
     let listener = TcpListener::bind(&address)
         .await
-        .map_err(|error| anyhow::anyhow!("could not bind {address}: {error}"))?;
+        .context(format!("could not bind {address}"))?;
     let local = listener.local_addr()?;
-    eprintln!("[enact-agent] MCP HTTP transport listening on http://{local}");
+    eprintln!(
+        "{}",
+        zeroclaw_runtime::i18n::get_required_cli_string_with_args(
+            "cli-enact-mcp-http-listening",
+            &[("address", &local.to_string())],
+        )
+    );
     let server = Arc::new(server);
     loop {
-        let (stream, _peer) = listener
-            .accept()
-            .await
-            .map_err(|error| anyhow::anyhow!("accept failed: {error}"))?;
+        let (stream, _peer) = listener.accept().await.context("accept failed")?;
         let server = Arc::clone(&server);
-        tokio::spawn(async move {
+        ::zeroclaw_spawn::spawn!(async move {
             if let Err(error) = handle_connection(server, stream).await {
-                eprintln!("[enact-agent] MCP HTTP connection failed: {error}");
+                eprintln!(
+                    "{}",
+                    zeroclaw_runtime::i18n::get_required_cli_string_with_args(
+                        "cli-enact-mcp-http-connection-failed",
+                        &[("error", &error.to_string())],
+                    )
+                );
             }
         });
     }
@@ -115,7 +126,11 @@ fn find_header_end(buffer: &[u8]) -> Option<usize> {
 }
 
 /// Write a response with a JSON body.
-async fn write_json(stream: &mut TcpStream, status: &str, body: &Value) -> anyhow::Result<()> {
+async fn write_json(
+    stream: &mut TcpStream,
+    status: &str,
+    body: &JsonRpcResponse,
+) -> anyhow::Result<()> {
     let payload = serde_json::to_vec(body)?;
     let head = format!(
         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -150,7 +165,7 @@ async fn handle_connection(server: Arc<McpServer>, mut stream: TcpStream) -> any
     };
 
     match (request.method.as_str(), request.path.as_str()) {
-        ("GET", "/health") | ("GET", "/healthz") => {
+        ("GET", "/health" | "/healthz") => {
             // The health check reports the tool count, so a supervisor can
             // see that a live server is serving the registry it expects and
             // not an empty one.
@@ -158,7 +173,7 @@ async fn handle_connection(server: Arc<McpServer>, mut stream: TcpStream) -> any
             write_text(&mut stream, "200 OK", &format!("ok\ntools: {tools}\n")).await?;
             return Ok(());
         }
-        ("POST", "/") | ("POST", "/mcp") => {}
+        ("POST", "/" | "/mcp") => {}
         ("POST", _) => {
             write_text(&mut stream, "404 Not Found", "no such endpoint\n").await?;
             return Ok(());
@@ -172,16 +187,8 @@ async fn handle_connection(server: Arc<McpServer>, mut stream: TcpStream) -> any
     let message: Value = match serde_json::from_slice(&request.body) {
         Ok(message) => message,
         Err(error) => {
-            write_json(
-                &mut stream,
-                "400 Bad Request",
-                &json!({
-                    "jsonrpc": "2.0",
-                    "id": Value::Null,
-                    "error": { "code": -32700, "message": format!("parse error: {error}") }
-                }),
-            )
-            .await?;
+            let response = parse_error_response(&error.to_string());
+            write_json(&mut stream, "400 Bad Request", &response).await?;
             return Ok(());
         }
     };
@@ -191,7 +198,9 @@ async fn handle_connection(server: Arc<McpServer>, mut stream: TcpStream) -> any
         // A notification has no response; 204 says so without a body.
         None => {
             stream
-                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
                 .await?;
             stream.flush().await?;
         }
@@ -217,7 +226,7 @@ mod tests {
         ));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
+        ::zeroclaw_spawn::spawn!(async move {
             let (stream, _) = listener.accept().await.unwrap();
             handle_connection(server, stream).await.unwrap();
         });
@@ -241,7 +250,7 @@ mod tests {
         ));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
+        ::zeroclaw_spawn::spawn!(async move {
             let (stream, _) = listener.accept().await.unwrap();
             handle_connection(server, stream).await.unwrap();
         });
@@ -268,7 +277,7 @@ mod tests {
         ));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
+        ::zeroclaw_spawn::spawn!(async move {
             let (stream, _) = listener.accept().await.unwrap();
             handle_connection(server, stream).await.unwrap();
         });
@@ -291,7 +300,7 @@ mod tests {
         ));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
+        ::zeroclaw_spawn::spawn!(async move {
             let (stream, _) = listener.accept().await.unwrap();
             handle_connection(server, stream).await.unwrap();
         });

@@ -25,18 +25,18 @@
 //! guessing it next time. The notice travels beside the result, not inside
 //! it, so the result body stays exactly what the tool produced.
 //!
-//! The legacy names are hidden from the *host* surface — the MCP server
-//! publishes the canonical families only — but they stay in the product's own
-//! tool list. The runtime keys several behaviours on those names (the
-//! delivery defaults it injects into a `cron_add` call, the approved
-//! arguments it sets, the tools it withholds from a step), and an agent that
-//! was told to call `cron_add` must still find it.
+//! The legacy names are hidden from the provider-facing and *host* surfaces —
+//! the model and MCP server learn the canonical families only — but they stay
+//! in the runtime registry. The runtime keys several behaviours on those
+//! names (the delivery defaults it injects into a `cron_add` call, the
+//! approved arguments it sets, the tools it withholds from a step), and a
+//! legacy call must still be parseable and dispatchable.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use zeroclaw_api::attribution::{Attributable, Role, ToolKind};
 use zeroclaw_api::tool::{Tool, ToolResult};
@@ -157,32 +157,68 @@ pub const FAMILIES: &[Family] = &[
 /// argument. It is checked against the operations inventory at build time,
 /// so it cannot drift away from the canonical registry the bridge publishes.
 pub const MEMBERS: &[Member] = &[
-    Member { tool: "cron_add", ops: &["add"], action_backed: false },
-    Member { tool: "cron_list", ops: &["list"], action_backed: false },
-    Member { tool: "cron_remove", ops: &["remove"], action_backed: false },
-    Member { tool: "cron_update", ops: &["update"], action_backed: false },
-    Member { tool: "cron_run", ops: &["run"], action_backed: false },
-    Member { tool: "cron_runs", ops: &["list_runs"], action_backed: false },
+    Member {
+        tool: "cron_add",
+        ops: &["add"],
+        action_backed: false,
+    },
+    Member {
+        tool: "cron_list",
+        ops: &["list"],
+        action_backed: false,
+    },
+    Member {
+        tool: "cron_remove",
+        ops: &["remove"],
+        action_backed: false,
+    },
+    Member {
+        tool: "cron_update",
+        ops: &["update"],
+        action_backed: false,
+    },
+    Member {
+        tool: "cron_run",
+        ops: &["run"],
+        action_backed: false,
+    },
+    Member {
+        tool: "cron_runs",
+        ops: &["list_runs"],
+        action_backed: false,
+    },
     Member {
         tool: "schedule",
         ops: &[
-            "add",
-            "cancel",
-            "create",
-            "get",
-            "list",
-            "once",
-            "pause",
-            "remove",
-            "resume",
+            "add", "cancel", "create", "get", "list", "once", "pause", "remove", "resume",
         ],
         action_backed: true,
     },
-    Member { tool: "sop_list", ops: &["list"], action_backed: false },
-    Member { tool: "sop_execute", ops: &["execute"], action_backed: false },
-    Member { tool: "sop_advance", ops: &["advance"], action_backed: false },
-    Member { tool: "sop_approve", ops: &["approve"], action_backed: false },
-    Member { tool: "sop_status", ops: &["status"], action_backed: false },
+    Member {
+        tool: "sop_list",
+        ops: &["list"],
+        action_backed: false,
+    },
+    Member {
+        tool: "sop_execute",
+        ops: &["execute"],
+        action_backed: false,
+    },
+    Member {
+        tool: "sop_advance",
+        ops: &["advance"],
+        action_backed: false,
+    },
+    Member {
+        tool: "sop_approve",
+        ops: &["approve"],
+        action_backed: false,
+    },
+    Member {
+        tool: "sop_status",
+        ops: &["status"],
+        action_backed: false,
+    },
     Member {
         tool: "sop_workshop",
         ops: &[
@@ -196,19 +232,71 @@ pub const MEMBERS: &[Member] = &[
         ],
         action_backed: true,
     },
-    Member { tool: "memory_store", ops: &["store"], action_backed: false },
-    Member { tool: "memory_recall", ops: &["recall"], action_backed: false },
-    Member { tool: "memory_forget", ops: &["forget"], action_backed: false },
-    Member { tool: "memory_export", ops: &["export"], action_backed: false },
-    Member { tool: "memory_purge", ops: &["purge"], action_backed: false },
-    Member { tool: "a2a_discover", ops: &["discover"], action_backed: false },
-    Member { tool: "a2a_send", ops: &["send"], action_backed: false },
-    Member { tool: "a2a_get_task", ops: &["get_task"], action_backed: false },
-    Member { tool: "a2a_cancel", ops: &["cancel"], action_backed: false },
-    Member { tool: "sessions_current", ops: &["current"], action_backed: false },
-    Member { tool: "sessions_list", ops: &["list"], action_backed: false },
-    Member { tool: "sessions_history", ops: &["history"], action_backed: false },
-    Member { tool: "sessions_send", ops: &["send"], action_backed: false },
+    Member {
+        tool: "memory_store",
+        ops: &["store"],
+        action_backed: false,
+    },
+    Member {
+        tool: "memory_recall",
+        ops: &["recall"],
+        action_backed: false,
+    },
+    Member {
+        tool: "memory_forget",
+        ops: &["forget"],
+        action_backed: false,
+    },
+    Member {
+        tool: "memory_export",
+        ops: &["export"],
+        action_backed: false,
+    },
+    Member {
+        tool: "memory_purge",
+        ops: &["purge"],
+        action_backed: false,
+    },
+    Member {
+        tool: "a2a_discover",
+        ops: &["discover"],
+        action_backed: false,
+    },
+    Member {
+        tool: "a2a_send",
+        ops: &["send"],
+        action_backed: false,
+    },
+    Member {
+        tool: "a2a_get_task",
+        ops: &["get_task"],
+        action_backed: false,
+    },
+    Member {
+        tool: "a2a_cancel",
+        ops: &["cancel"],
+        action_backed: false,
+    },
+    Member {
+        tool: "sessions_current",
+        ops: &["current"],
+        action_backed: false,
+    },
+    Member {
+        tool: "sessions_list",
+        ops: &["list"],
+        action_backed: false,
+    },
+    Member {
+        tool: "sessions_history",
+        ops: &["history"],
+        action_backed: false,
+    },
+    Member {
+        tool: "sessions_send",
+        ops: &["send"],
+        action_backed: false,
+    },
     Member {
         tool: "model_switch",
         ops: &["get", "list_model_providers", "list_models", "set"],
@@ -252,14 +340,26 @@ pub const MEMBERS: &[Member] = &[
         ops: &["list", "match"],
         action_backed: true,
     },
-    Member { tool: "file_upload", ops: &["upload"], action_backed: false },
+    Member {
+        tool: "file_upload",
+        ops: &["upload"],
+        action_backed: false,
+    },
     Member {
         tool: "file_upload_bundle",
         ops: &["upload_bundle"],
         action_backed: false,
     },
-    Member { tool: "email_search", ops: &["search"], action_backed: false },
-    Member { tool: "email_read", ops: &["read"], action_backed: false },
+    Member {
+        tool: "email_search",
+        ops: &["search"],
+        action_backed: false,
+    },
+    Member {
+        tool: "email_read",
+        ops: &["read"],
+        action_backed: false,
+    },
 ];
 
 /// The member specification for a legacy tool name.
@@ -369,11 +469,7 @@ fn family_actions(family: &Family) -> Vec<FamilyActionSpec> {
             (*op).to_string()
         };
         used.insert(action.clone());
-        out.push(FamilyActionSpec {
-            action,
-            member,
-            op,
-        });
+        out.push(FamilyActionSpec { action, member, op });
     }
     out
 }
@@ -433,10 +529,8 @@ impl FamilyTool {
     /// A family with no member present is not built: the canonical tool
     /// would advertise actions the agent cannot run.
     pub fn build(family: &Family, members: Vec<Arc<dyn Tool>>) -> Option<Self> {
-        let present: HashMap<&str, &Arc<dyn Tool>> = members
-            .iter()
-            .map(|tool| (tool.name(), tool))
-            .collect();
+        let present: HashMap<&str, &Arc<dyn Tool>> =
+            members.iter().map(|tool| (tool.name(), tool)).collect();
         let mut actions = Vec::new();
         for spec in family_actions(family) {
             let Some(tool) = present.get(spec.member) else {
@@ -489,10 +583,7 @@ fn describe(family: &Family, actions: &[FamilyAction]) -> String {
         if member_actions.is_empty() {
             continue;
         }
-        let Some(action) = actions
-            .iter()
-            .find(|action| action.tool.name() == *member)
-        else {
+        let Some(action) = actions.iter().find(|action| action.tool.name() == *member) else {
             continue;
         };
         lines.push(format!(
@@ -518,6 +609,25 @@ impl Attributable for FamilyTool {
 impl Tool for FamilyTool {
     fn name(&self) -> &str {
         self.name
+    }
+
+    fn requires_unrestricted_principal(&self) -> bool {
+        self.actions
+            .iter()
+            .any(|action| action.tool.requires_unrestricted_principal())
+    }
+
+    fn restricted_principal_variant(&self) -> Option<Box<dyn Tool>> {
+        let family = family_by_name(self.name)?;
+        let mut seen = HashSet::new();
+        let members = self
+            .actions
+            .iter()
+            .filter(|action| !action.tool.requires_unrestricted_principal())
+            .filter(|action| seen.insert(action.tool.name()))
+            .map(|action| Arc::clone(&action.tool))
+            .collect();
+        Self::build(family, members).map(|tool| Box::new(tool) as Box<dyn Tool>)
     }
 
     fn description(&self) -> &str {
@@ -678,7 +788,7 @@ mod tests {
     }
 
     impl Fake {
-        fn new(name: &'static str) -> (Arc<dyn Tool>, Arc<Mutex<Vec<Value>>>) {
+        fn named(name: &'static str) -> (Arc<dyn Tool>, Arc<Mutex<Vec<Value>>>) {
             let seen = Arc::new(Mutex::new(Vec::new()));
             let tool: Arc<dyn Tool> = Arc::new(Self {
                 name,
@@ -706,7 +816,10 @@ mod tests {
         }
 
         async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
-            self.seen.lock().expect("the fake records its calls").push(args.clone());
+            self.seen
+                .lock()
+                .expect("the fake records its calls")
+                .push(args.clone());
             Ok(ToolResult::ok(format!("{}:{}", self.name, args)))
         }
     }
@@ -742,7 +855,10 @@ mod tests {
         for family in FAMILIES {
             for member in family.members {
                 let spec = member_spec(member).unwrap_or_else(|| panic!("{member} is declared"));
-                assert!(!spec.ops.is_empty(), "{member} exposes at least one operation");
+                assert!(
+                    !spec.ops.is_empty(),
+                    "{member} exposes at least one operation"
+                );
             }
         }
         for member in MEMBERS {
@@ -767,7 +883,11 @@ mod tests {
         for family in FAMILIES {
             let mut seen = HashSet::new();
             for action in actions_of(family.name) {
-                assert!(seen.insert(action.clone()), "{action} is unique in {family}", family = family.name);
+                assert!(
+                    seen.insert(action.clone()),
+                    "{action} is unique in {family}",
+                    family = family.name
+                );
             }
         }
     }
@@ -852,18 +972,17 @@ mod tests {
             actions_of("mcp"),
             vec!["mcp_resources_list", "read", "mcp_prompts_list", "get"]
         );
-        assert_eq!(actions_of("memory"), vec!["store", "recall", "forget", "export", "purge"]);
+        assert_eq!(
+            actions_of("memory"),
+            vec!["store", "recall", "forget", "export", "purge"]
+        );
         assert_eq!(actions_of("file_uploads"), vec!["upload", "upload_bundle"]);
     }
 
     #[tokio::test]
     async fn a_family_dispatches_to_its_member() {
-        let (cron_list, seen) = Fake::new("cron_list");
-        let tool = FamilyTool::build(
-            family("cron"),
-            vec![Arc::clone(&cron_list)],
-        )
-        .unwrap();
+        let (cron_list, seen) = Fake::named("cron_list");
+        let tool = FamilyTool::build(family("cron"), vec![Arc::clone(&cron_list)]).unwrap();
         // `list` is shared with the schedule tool, so the family names it
         // `cron_list` — the same name the canonical registry publishes.
         assert!(tool.action_names().contains(&"cron_list".to_string()));
@@ -876,12 +995,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_tool_contract_member_is_called_without_an_action() {
-        let (cron_add, seen) = Fake::new("cron_add");
-        let tool = FamilyTool::build(
-            family("cron"),
-            vec![Arc::clone(&cron_add)],
-        )
-        .unwrap();
+        let (cron_add, seen) = Fake::named("cron_add");
+        let tool = FamilyTool::build(family("cron"), vec![Arc::clone(&cron_add)]).unwrap();
         tool.execute(json!({"action": "cron_add", "value": "x"}))
             .await
             .unwrap();
@@ -891,12 +1006,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_action_backed_member_receives_its_own_operation() {
-        let (schedule, seen) = Fake::new("schedule");
-        let tool = FamilyTool::build(
-            family("cron"),
-            vec![Arc::clone(&schedule)],
-        )
-        .unwrap();
+        let (schedule, seen) = Fake::named("schedule");
+        let tool = FamilyTool::build(family("cron"), vec![Arc::clone(&schedule)]).unwrap();
         tool.execute(json!({"action": "schedule_add", "expression": "daily"}))
             .await
             .unwrap();
@@ -907,24 +1018,16 @@ mod tests {
 
     #[tokio::test]
     async fn a_family_without_an_action_says_what_it_expects() {
-        let (cron_add, _) = Fake::new("cron_add");
-        let tool = FamilyTool::build(
-            family("cron"),
-            vec![Arc::clone(&cron_add)],
-        )
-        .unwrap();
+        let (cron_add, _) = Fake::named("cron_add");
+        let tool = FamilyTool::build(family("cron"), vec![Arc::clone(&cron_add)]).unwrap();
         let error = tool.execute(json!({})).await.unwrap_err();
         assert!(error.to_string().contains("requires an action"));
     }
 
     #[tokio::test]
     async fn a_family_rejects_an_unknown_action() {
-        let (cron_add, _) = Fake::new("cron_add");
-        let tool = FamilyTool::build(
-            family("cron"),
-            vec![Arc::clone(&cron_add)],
-        )
-        .unwrap();
+        let (cron_add, _) = Fake::named("cron_add");
+        let tool = FamilyTool::build(family("cron"), vec![Arc::clone(&cron_add)]).unwrap();
         let error = tool.execute(json!({"action": "nope"})).await.unwrap_err();
         assert!(error.to_string().contains("unknown action"));
     }
@@ -936,12 +1039,8 @@ mod tests {
 
     #[test]
     fn a_family_schema_declares_its_action_enum() {
-        let (cron_add, _) = Fake::new("cron_add");
-        let tool = FamilyTool::build(
-            family("cron"),
-            vec![Arc::clone(&cron_add)],
-        )
-        .unwrap();
+        let (cron_add, _) = Fake::named("cron_add");
+        let tool = FamilyTool::build(family("cron"), vec![Arc::clone(&cron_add)]).unwrap();
         let schema = tool.parameters_schema();
         assert_eq!(schema["properties"]["action"]["enum"], json!(["cron_add"]));
         assert_eq!(schema["required"], json!(["action"]));
@@ -957,12 +1056,8 @@ mod tests {
 
     #[test]
     fn a_family_description_lists_its_actions() {
-        let (schedule, _) = Fake::new("schedule");
-        let tool = FamilyTool::build(
-            family("cron"),
-            vec![Arc::clone(&schedule)],
-        )
-        .unwrap();
+        let (schedule, _) = Fake::named("schedule");
+        let tool = FamilyTool::build(family("cron"), vec![Arc::clone(&schedule)]).unwrap();
         let description = tool.description().to_string();
         assert!(description.contains("schedule_add"), "{description}");
         assert!(description.contains("a fake tool"), "{description}");
@@ -986,7 +1081,9 @@ mod tests {
         let mut announced = HashSet::new();
         let notice = take_notice_from(&mut announced, "schedule").expect("the notice is due");
         assert_eq!(notice["canonical_tool"], json!("cron"));
-        let actions = notice["actions"].as_array().expect("the actions are listed");
+        let actions = notice["actions"]
+            .as_array()
+            .expect("the actions are listed");
         assert_eq!(actions.len(), 9);
         assert!(actions.contains(&json!("schedule_add")));
     }
@@ -995,10 +1092,7 @@ mod tests {
     fn the_notice_attaches_to_the_structured_data() {
         let mut announced = HashSet::new();
         let mut data: Option<Value> = None;
-        attach_notice(
-            take_notice_from(&mut announced, "cron_list"),
-            &mut data,
-        );
+        attach_notice(take_notice_from(&mut announced, "cron_list"), &mut data);
         let data = data.expect("the notice attaches");
         assert_eq!(data["deprecation"]["canonical_tool"], json!("cron"));
     }

@@ -36,6 +36,31 @@ let escaped = "quote: \\\" ZEROCLAW_SOCKET";
         self.assertEqual(build.project_environment_literals(source), expected)
         self.assertEqual(build.project_environment_literals(expected), expected)
 
+    def test_docker_build_args_keep_their_upstream_namespace(self):
+        source = '''const ARG: &str = "ZEROCLAW_BASE_RUST_SLIM";
+const MIXED: &str = "ZEROCLAW_BASE_NODE ZEROCLAW_SOCKET";
+const CARGO_FLAGS: &str = "ZEROCLAW_CARGO_FLAGS";
+'''
+        expected = '''const ARG: &str = "ZEROCLAW_BASE_RUST_SLIM";
+const MIXED: &str = "ZEROCLAW_BASE_NODE ENACT_AGENT_SOCKET";
+const CARGO_FLAGS: &str = "ZEROCLAW_CARGO_FLAGS";
+'''
+        self.assertEqual(build.project_environment_literals(source), expected)
+
+    def test_installer_accepts_enact_feature_override_and_upstream_alias(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            shutil.copy2(build.ROOT / "install.sh", root / "install.sh")
+            build.project_enact_installer_environment(root)
+            installer = (root / "install.sh").read_text()
+        self.assertIn('"${ENACT_AGENT_CARGO_FEATURES:-}"', installer)
+        self.assertIn('$ENACT_AGENT_CARGO_FEATURES', installer)
+        self.assertIn('ENACT_AGENT_CARGO_FEATURES  Extra features', installer)
+        self.assertIn('feature environment override', installer)
+        self.assertIn('"${ZEROCLAW_CARGO_FEATURES:-}"', installer)
+        self.assertIn('$ZEROCLAW_CARGO_FEATURES', installer)
+
+
     def test_identifiers_comments_characters_and_notices_are_unchanged(self):
         source = '''// Copyright ZEROCLAW_HOLDER. "ZEROCLAW_SOCKET"
 /* Outer "ZEROCLAW_CONFIG_DIR" /* nested */ ZEROCLAW_NAME */
@@ -69,6 +94,166 @@ use zeroclaw_runtime::rpc;
             self.assertEqual(build.project_environment_literals(projected), projected, name)
             count += projected != source
         self.assertGreater(count, 80)
+
+
+class ExcludedMemoryProjectionTests(unittest.TestCase):
+    def test_excluded_memory_uses_none_backend_and_skips_native_rebind(self):
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            relatives = (
+                "crates/zeroclaw-runtime/src/agent/agent.rs",
+                "crates/zeroclaw-runtime/src/tools/delegate.rs",
+            )
+            for relative in relatives:
+                target = source / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(build.ROOT / relative, target)
+            delegate = source / relatives[1]
+            build.replace_required(
+                delegate,
+                "        let target_workspace = config.agent_workspace_dir(agent_name);\n"
+                "        let skills = if construction == crate::composition::RegistryConstruction::NativeCompat {\n"
+                "            crate::skills::load_skills_for_agent_from_config(config, agent_name)\n"
+                "        } else {\n"
+                "            Vec::new()\n"
+                "        };\n\n"
+                "        let assembled = crate::tools::scoped::ScopedToolRegistry::assemble_prepared(\n",
+                "        let target_workspace = config.agent_workspace_dir(agent_name);\n"
+                "        let skills = if construction == crate::composition::RegistryConstruction::NativeCompat {\n"
+                "            crate::skills::load_skills_for_agent_from_config(config, agent_name)\n"
+                "        } else {\n"
+                "            Vec::new()\n"
+                "        };\n"
+                "        let caller_scope = current_delegate_caller_tool_selector();\n\n"
+                "        let assembled = crate::tools::scoped::ScopedToolRegistry::assemble_prepared(\n",
+            )
+            build.replace_required(
+                delegate,
+                "                runtime,\n"
+                "                caller_allowed: None,\n"
+                "                connect_mcp: true,\n",
+                "                runtime,\n"
+                "                caller_allowed: caller_scope.as_deref(),\n"
+                "                connect_mcp: true,\n",
+            )
+            build.replace_required(
+                delegate,
+                "                let bounded_default_config = Config::default();\n"
+                "                let bounded_security = Arc::new(SecurityPolicy::default());\n"
+                "                let assembled_bounded =\n",
+                "                let bounded_default_config = Config::default();\n"
+                "                let bounded_security = Arc::new(SecurityPolicy::default());\n"
+                "                let caller_scope = current_delegate_caller_tool_selector();\n"
+                "                let assembled_bounded =\n",
+            )
+            build.project_enact_excluded_memory_isolation(source)
+            agent, delegate = ((source / relative).read_text() for relative in relatives)
+        self.assertIn("if exclude_memory {", agent)
+        self.assertIn('Arc::new(zeroclaw_memory::NoneMemory::new("none"))', agent)
+        self.assertIn("if self.inject_memory {", agent)
+        self.assertIn(
+            "self.tools\n                .rebind_memory_tools",
+            agent,
+        )
+        self.assertIn("let memory_free = current_delegate_caller_memory_free();", delegate)
+        self.assertIn('Arc::new(zeroclaw_memory::NoneMemory::new("none"))', delegate)
+        self.assertIn("exclude_memory: memory_free", delegate)
+
+
+class RelayDialProjectionTests(unittest.TestCase):
+    def test_dial_cancellation_uses_a_deterministic_pending_connector(self):
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            target = source / "crates/zeroclaw-runtime/src/relay.rs"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(build.ROOT / "crates/zeroclaw-runtime/src/relay.rs", target)
+            build.project_enact_relay_dial_test_seam(source)
+            projected = target.read_text()
+        self.assertIn("async fn bridge_conn_with_dialer<F, Fut>(", projected)
+        self.assertIn("connect(socket, remote)", projected)
+        self.assertIn("std::future::pending::<std::io::Result<tokio::net::TcpStream>>()", projected)
+        self.assertNotIn("fn stalled_listener", projected)
+
+
+class ContainerEnvironmentProjectionTests(unittest.TestCase):
+    def test_compose_runtime_overrides_follow_enact_environment_namespace(self):
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            shutil.copy2(build.ROOT / "docker-compose.yml", source / "docker-compose.yml")
+            build.project_enact_container_environment(source)
+            compose = (source / "docker-compose.yml").read_text()
+        self.assertIn("ENACT_AGENT_gateway__host=0.0.0.0", compose)
+        self.assertIn("ENACT_AGENT_gateway__allow_public_bind=true", compose)
+        self.assertIn("ENACT_AGENT_gateway__port=${ENACT_AGENT_GATEWAY_PORT:-42617}", compose)
+        self.assertIn("${HOST_PORT:-127.0.0.1:42617}:${ENACT_AGENT_GATEWAY_PORT:-42617}", compose)
+        self.assertNotIn("ZEROCLAW_gateway__", compose)
+        self.assertNotIn("${ZEROCLAW_GATEWAY_PORT", compose)
+
+
+class ComponentFixtureProjectionTests(unittest.TestCase):
+    def test_integration_fixtures_follow_enact_command_and_workspace_contracts(self):
+        paths = (
+            "tests/component/agents_export_cli.rs",
+            "tests/component/config_patch_cli.rs",
+            "tests/component/acp_session_cwd_stdio.rs",
+            "tests/component/cron_help_examples.rs",
+        )
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            for relative in paths:
+                target = source / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(build.ROOT / relative, target)
+            build.project_enact_component_fixtures(source, build.manifest())
+            export, ownership, acp, cron = ((source / relative).read_text() for relative in paths)
+
+        self.assertIn('install.path().join("workspace/agents/export_fixture")', export)
+        self.assertNotIn('install.path().join("agents/export_fixture/workspace")', export)
+        self.assertIn("Cannot run `enact-agent agent` while another Enact Agent process owns", ownership)
+        self.assertIn("`enact-agent agent --agent missing` is not configured", ownership)
+        self.assertIn('ws.ends_with("workspace/agents/test-agent")', acp)
+        self.assertEqual(cron.count("enact-agent cron"), 12)
+        self.assertNotIn("zeroclaw cron", cron)
+
+    def test_runtime_cli_alias_and_cron_example_use_enact_fluent_keys(self):
+        relatives = ("src/main.rs", "src/cron/mod.rs")
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            for relative in relatives:
+                target = source / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(build.ROOT / relative, target)
+            build.project_enact_cli_command_strings(source, build.manifest())
+            main, cron = ((source / relative).read_text() for relative in relatives)
+
+        self.assertEqual(main.count('"cli-enact-agent-alias-not-configured"'), 2)
+        self.assertNotIn('"`zeroclaw agent --agent {agent_alias}` is not configured', main)
+        self.assertIn('get_required_cli_string("cli-enact-cron-empty-usage")', cron)
+        self.assertNotIn('println!("  zeroclaw cron add', cron)
+
+
+class WorkspacePathProjectionTests(unittest.TestCase):
+    def test_workspace_export_guards_follow_the_enact_layout(self):
+        relatives = (
+            "crates/zeroclaw-config/src/schema.rs",
+            "crates/zeroclaw-config/src/platform/native.rs",
+            "crates/zeroclaw-config/src/agent_bundle.rs",
+            "src/alias_cli/export.rs",
+        )
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            for relative in relatives:
+                target = source / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(build.ROOT / relative, target)
+            build.project_workspace_owned_agent_paths(source)
+            exporter = (source / relatives[-1]).read_text()
+
+        self.assertIn('install.path().join("workspace/agents")', exporter)
+        self.assertIn('install.path().join("workspace")', exporter)
+        self.assertIn('vec!["workspace".to_string()]', exporter)
+        self.assertIn('agents/researcher/host.md', exporter)
+        self.assertNotIn('researcher/workspace/host.md', exporter)
 
 
 class SessionToolsProjectionTests(unittest.TestCase):
@@ -161,7 +346,16 @@ class BuiltinCapabilitiesTests(unittest.TestCase):
             before = {path: (source / path).read_bytes() for path in self.paths}
             build.project_enact_agent_capabilities(source)
             for path, content in before.items():
-                self.assertEqual((source / path).read_bytes(), content)
+                if path != "Cargo.toml":
+                    self.assertEqual((source / path).read_bytes(), content)
+            self.assertEqual(
+                (source / "Cargo.toml").read_text(),
+                before["Cargo.toml"].decode().rstrip()
+                + '\n\n[[test]]\n'
+                'name = "enact_builtin_capabilities"\n'
+                'path = "tests/enact_builtin_capabilities.rs"\n'
+                'required-features = ["agent-runtime", "tools-external"]\n',
+            )
             self.assertEqual((source / "tests/enact_builtin_capabilities.rs").read_bytes(),
                              before[self.paths[-1]])
             with self.assertRaisesRegex(RuntimeError, "already exists"):
@@ -554,16 +748,191 @@ class ConsolidatedFamilyTests(unittest.TestCase):
     def test_the_scope_filter_consults_the_family_table(self):
         with tempfile.TemporaryDirectory() as name:
             source = Path(name)
-            target = source / "crates/zeroclaw-runtime/src/tools/scoped.rs"
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(build.ROOT / "crates/zeroclaw-runtime/src/tools/scoped.rs", target)
+            relatives = (
+                "crates/zeroclaw-api/src/tool.rs",
+                "crates/zeroclaw-runtime/src/tools/scoped.rs",
+                "crates/zeroclaw-runtime/src/tools/mod.rs",
+                "crates/zeroclaw-runtime/src/tools/delegate.rs",
+                "crates/zeroclaw-runtime/src/tools/skill_tool.rs",
+                "crates/zeroclaw-tools/src/tool_search.rs",
+                "crates/zeroclaw-runtime/src/agent/agent.rs",
+                "crates/zeroclaw-gateway/src/dashboard_core.rs",
+            )
+            for relative in relatives:
+                target = source / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(build.ROOT / relative, target)
             build.project_enact_family_scope_filter(source)
-            projected = target.read_text()
-        self.assertIn("crate::tools::families::family_by_name(name)", projected)
+            api, scoped, runtime_tools, delegate_tools, skill_tools, tool_search, agent, gateway = (
+                (source / relative).read_text() for relative in relatives
+            )
+        self.assertIn("crate::tools::families::family_by_name(name)", scoped)
         self.assertIn(
             ".any(|member| tool_allowed_in_context(member, exclude_memory, acp_delivery))",
-            projected,
+            scoped,
         )
+        self.assertIn("!tool.requires_unrestricted_principal()", scoped)
+        self.assertIn("pub(crate) fn retain_projected(", scoped)
+        self.assertIn("restricted_principal_variant", api)
+        self.assertIn("self.0.restricted_principal_variant()", runtime_tools)
+        self.assertEqual(delegate_tools.count("self.inner.restricted_principal_variant()"), 2)
+        self.assertIn("self.target_tool.restricted_principal_variant()", skill_tools)
+        self.assertIn("tool_name: self.tool_name.clone()", skill_tools)
+        self.assertIn("locked_args: self.locked_args.clone()", skill_tools)
+        self.assertIn("restricted_skill_family_preserves_alias_and_locked_action", skill_tools)
+        self.assertIn("selected == \"mcp\"", tool_search)
+        self.assertIn("canonical_mcp_selector_admits_capabilities", tool_search)
+        self.assertIn("tool.restricted_principal_variant()", agent)
+        self.assertIn("self.tools.retain_projected", agent)
+        self.assertIn("built.unfiltered_tool_arcs = tools.to_vec()", runtime_tools)
+        self.assertIn("family.members.iter().any(|member|", agent)
+        self.assertIn('offered_actions(&fixture._model, marker, "sessions").await', gateway)
+        self.assertIn('vec!["current"]', gateway)
+        self.assertIn("caller_scope_wraps_delegate_execution", scoped)
+        self.assertIn("memory_free_assembly_scopes_delegate_without_selector", scoped)
+        self.assertIn("scope_caller_tool", scoped)
+        self.assertNotIn("if caller_allowed.is_none()", scoped)
+        self.assertIn("enact_project_supplied_families", scoped)
+        self.assertIn("current_delegate_caller_tool_selector", delegate_tools)
+        self.assertIn("current_delegate_caller_memory_free", delegate_tools)
+        self.assertIn("exclude_memory: caller_memory_free", delegate_tools)
+        self.assertIn("caller_allowed: caller_scope.as_deref()", delegate_tools)
+        self.assertIn("spawned_caller_context_preserves_selector_and_memory_policy", delegate_tools)
+        self.assertGreaterEqual(
+            delegate_tools.count("Box::pin(scope_delegate_caller_context("), 2
+        )
+        self.assertIn("parent_caller_tool_selector.clone()", delegate_tools)
+        self.assertIn("Arc::from(tool.restricted_principal_variant()?)", delegate_tools)
+        self.assertIn("registry.retain_projected", delegate_tools)
+        families = (build.ROOT / "overlays/enact/native/tools/families.rs").read_text()
+        self.assertIn(".any(|action| action.tool.requires_unrestricted_principal())", families)
+
+    def test_early_tool_factory_return_registers_the_canonical_families(self):
+        relative = "crates/zeroclaw-runtime/src/tools/mod.rs"
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            target = source / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(build.ROOT / relative, target)
+            build.project_enact_family_early_return(source)
+            projected = target.read_text()
+
+        early_return = projected.index("Match the normal registry path before returning")
+        return_result = projected.index("return Ok(AllToolsResult {", early_return)
+        self.assertLess(early_return, return_result)
+        self.assertIn("build_all(&tool_arcs)", projected[early_return:return_result])
+        self.assertIn("&root_config.tools", projected[early_return:return_result])
+
+    def test_provider_request_projection_hides_members_and_preserves_runtime_specs(self):
+        relative = "crates/zeroclaw-runtime/src/agent/turn/tool_specs.rs"
+        original = (build.ROOT / relative).read_text()
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            target = source / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(build.ROOT / relative, target)
+            build.project_enact_family_request_specs(source)
+            projected = target.read_text()
+
+        self.assertNotEqual(projected, original, "family projection must change provider specs")
+        self.assertIn(".filter(|family| {", projected)
+        self.assertIn("hidden_builtin_names.extend(activated_tools.hidden_builtin_names());", projected)
+        self.assertIn("family_request_projection_hides_members_but_keeps_them_callable", projected)
+        self.assertIn("specs.known_tool_names.contains(*member)", projected)
+        # Preparing the same source twice is drift, not a silent no-op.
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            target = source / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(projected)
+            with self.assertRaisesRegex(RuntimeError, "Upstream overlay drift"):
+                build.project_enact_family_request_specs(source)
+
+    def test_contextual_mcp_family_is_built_after_its_policy_gate(self):
+        relative = "crates/zeroclaw-runtime/src/tools/scoped.rs"
+        original = (build.ROOT / relative).read_text()
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            target = source / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(build.ROOT / relative, target)
+            build.project_enact_contextual_mcp_family(source)
+            projected = target.read_text()
+
+        self.assertNotEqual(projected, original, "MCP family projection must change scoped assembly")
+        self.assertIn('family_by_name("mcp")', projected)
+        self.assertIn("family.members.contains(&tool.name())", projected)
+        self.assertIn("security.is_tool_excluded(family.name)", projected)
+        self.assertIn("name == family.name || name == tool.name()", projected)
+        self.assertIn("FamilyTool::build(family, members)", projected)
+        self.assertIn('eager_names.iter().any(|name| name == "mcp")', projected)
+        self.assertIn('deferred_names.iter().any(|name| name == "mcp")', projected)
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            target = source / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(projected)
+            with self.assertRaisesRegex(RuntimeError, "Upstream overlay drift"):
+                build.project_enact_contextual_mcp_family(source)
+
+    def test_delegate_expectations_use_the_canonical_sessions_family(self):
+        relatives = (
+            "crates/zeroclaw-runtime/src/tools/delegate.rs",
+            "tests/fixtures/runtime-composition-consumer/src/lib.rs",
+        )
+        originals = {relative: (build.ROOT / relative).read_text() for relative in relatives}
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            for relative in relatives:
+                target = source / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(build.ROOT / relative, target)
+            build.project_enact_family_delegate_tests(source)
+            projected = {relative: (source / relative).read_text() for relative in relatives}
+
+        for relative in relatives:
+            self.assertNotEqual(
+                projected[relative], originals[relative],
+                f"family test projection must change assertions in {relative}",
+            )
+        self.assertIn('for name in ["sessions", "spawn_subagent"]', projected[relatives[0]])
+        self.assertIn('offered_tool(&requests[1], "sessions")', projected[relatives[0]])
+        self.assertIn(
+            'first.iter().any(|name| name == "sessions")',
+            projected[relatives[1]],
+        )
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            for relative in relatives:
+                target = source / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(projected[relative])
+            with self.assertRaisesRegex(RuntimeError, "Upstream overlay drift"):
+                build.project_enact_family_delegate_tests(source)
+
+
+class ProviderProxyTestIsolationTests(unittest.TestCase):
+    def test_local_openai_request_fixtures_share_the_proxy_test_lock(self):
+        relative = "crates/zeroclaw-providers/src/openai.rs"
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            target = source / relative
+            target.parent.mkdir(parents=True)
+            shutil.copy2(build.ROOT / relative, target)
+            build.project_enact_provider_proxy_test_isolation(source)
+            projected = target.read_text()
+
+        self.assertEqual(
+            projected.count("let _proxy_guard = crate::RuntimeProxyTestGuard::acquire().await;"),
+            4,
+        )
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            target = source / relative
+            target.parent.mkdir(parents=True)
+            target.write_text(projected)
+            with self.assertRaisesRegex(RuntimeError, "Upstream overlay drift"):
+                build.project_enact_provider_proxy_test_isolation(source)
 
 
 class HookInterfaceInstallTests(unittest.TestCase):

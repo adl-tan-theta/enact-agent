@@ -56,7 +56,7 @@ pub struct Bootstrapped {
 
 /// Build the policy-filtered tool surface.
 pub async fn build_tool_surface(options: &BootstrapOptions) -> anyhow::Result<Bootstrapped> {
-    let config = Config::load_or_init()
+    let config = Box::pin(Config::load_or_init())
         .await
         .context("failed to load the Enact configuration")?;
 

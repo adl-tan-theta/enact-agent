@@ -84,7 +84,7 @@ pub async fn run(command: McpCommands) -> anyhow::Result<()> {
                 workspace,
                 connect_mcp,
             };
-            let bootstrapped = build_tool_surface(&options).await?;
+            let bootstrapped = Box::pin(build_tool_surface(&options)).await?;
             let expose = if expose_full {
                 Expose::Full
             } else {
@@ -92,21 +92,26 @@ pub async fn run(command: McpCommands) -> anyhow::Result<()> {
             };
             // stdout belongs to the protocol. Progress goes to stderr.
             eprintln!(
-                "[enact-agent] serving {} tools for agent {} (workspace {})",
-                bootstrapped.surface.len(),
-                bootstrapped.agent_alias,
-                bootstrapped.workspace.display()
+                "{}",
+                zeroclaw_runtime::i18n::get_required_cli_string_with_args(
+                    "cli-enact-mcp-serving",
+                    &[
+                        ("count", &bootstrapped.surface.len().to_string()),
+                        ("agent", &bootstrapped.agent_alias),
+                        ("workspace", &bootstrapped.workspace.display().to_string()),
+                    ],
+                )
             );
             if bootstrapped.surface.is_empty() {
                 eprintln!(
-                    "[enact-agent] the agent's policy exposes no tools; \
-                     the host will see an empty registry"
+                    "{}",
+                    zeroclaw_runtime::i18n::get_required_cli_string("cli-enact-mcp-empty-policy",)
                 );
             }
             if !bootstrapped.used_configured_agent {
                 eprintln!(
-                    "[enact-agent] no configured agent supplied a risk profile; \
-                     using the default supervised, workspace-only policy"
+                    "{}",
+                    zeroclaw_runtime::i18n::get_required_cli_string("cli-enact-mcp-default-policy",)
                 );
             }
             let server = McpServer::new(bootstrapped.surface, expose);
@@ -140,7 +145,10 @@ pub async fn run(command: McpCommands) -> anyhow::Result<()> {
                 });
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
-                println!("MCP servers configured for the coding hosts:");
+                println!(
+                    "{}",
+                    zeroclaw_runtime::i18n::get_required_cli_string("cli-enact-mcp-hosts-heading",)
+                );
                 for entry in &discovery.servers {
                     let target = entry
                         .url
@@ -152,20 +160,40 @@ pub async fn run(command: McpCommands) -> anyhow::Result<()> {
                                 .map(|command| format!("{command} {}", entry.args.join(" ")))
                         })
                         .unwrap_or_else(|| "(not runnable)".to_string());
-                    println!("  {:<24} {:<22} {target}", entry.name, entry.source.label());
+                    println!(
+                        "{}",
+                        zeroclaw_runtime::i18n::get_required_cli_string_with_args(
+                            "cli-enact-mcp-host-row",
+                            &[
+                                ("name", &entry.name),
+                                ("source", entry.source.label()),
+                                ("target", &target),
+                            ],
+                        )
+                    );
                 }
                 if discovery.servers.is_empty() {
-                    println!("  (none found)");
+                    println!(
+                        "{}",
+                        zeroclaw_runtime::i18n::get_required_cli_string("cli-enact-mcp-hosts-none",)
+                    );
                 } else {
                     println!(
-                        "  {} server(s): {}",
-                        discovery.names().len(),
-                        discovery.names().join(", ")
+                        "{}",
+                        zeroclaw_runtime::i18n::get_required_cli_string_with_args(
+                            "cli-enact-mcp-hosts-summary",
+                            &[
+                                ("count", &discovery.names().len().to_string()),
+                                ("names", &discovery.names().join(", ")),
+                            ],
+                        )
                     );
                     if discovery.get("enact").is_none() {
                         println!(
-                            "  note: no server named 'enact' is registered; \
-                             run `enact-agent mcp serve` and add it to the host"
+                            "{}",
+                            zeroclaw_runtime::i18n::get_required_cli_string(
+                                "cli-enact-mcp-hosts-enact-missing",
+                            )
                         );
                     }
                 }
