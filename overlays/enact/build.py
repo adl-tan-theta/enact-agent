@@ -385,6 +385,12 @@ def project_enact_family_scope_filter(source):
         "        }),\n"
         "    ).await\n"
         "}\n\n"
+        "pub(crate) async fn scope_memory_free_caller_context<F>(memory_free: bool, future: F) -> F::Output\n"
+        "where\n"
+        "    F: std::future::Future,\n"
+        "{\n"
+        "    DELEGATE_CALLER_MEMORY_FREE.scope(memory_free, future).await\n"
+        "}\n\n"
         "pub(crate) fn scope_caller_tool(\n"
         "    inner: Arc<dyn Tool>,\n"
         "    selector: Option<Vec<String>>,\n"
@@ -901,8 +907,10 @@ def project_enact_family_scope_filter(source):
         "    // name, and a family's own name is not one of theirs, so without\n"
         "    // this a memory-free run would still be offered the `memory`\n"
         "    // family — whose actions call the very tools `uses_memory =\n"
-        "    // false` removes.\n"
-        '    if crate::tools::delegate::current_delegate_caller_memory_free() && matches!(name, "sop_execute" | "sop_advance" | "sop_approve" | "cron_run") {\n'
+        "    // false` removes. The caller-memory-free task-local is separate\n"
+        "    // from `exclude_memory`, which also applies to ACP and admin views.\n"
+        '    if crate::tools::delegate::current_delegate_caller_memory_free()\n'
+        '        && matches!(name, "sop_execute" | "sop_advance" | "sop_approve" | "cron_run") {\n'
         "        return false;\n"
         "    }\n"
         "    if let Some(family) = crate::tools::families::family_by_name(name) {\n"
@@ -1231,8 +1239,10 @@ fn enact_assemble_supplied_only(
         "    // name, and a family's own name is not one of theirs, so without\n"
         "    // this a memory-free run would still be offered the `memory`\n"
         "    // family — whose actions call the very tools `uses_memory =\n"
-        "    // false` removes.\n"
-        '    if crate::tools::delegate::current_delegate_caller_memory_free() && matches!(name, "sop_execute" | "sop_advance" | "sop_approve" | "cron_run") {\n'
+        "    // false` removes. The caller-memory-free task-local is separate\n"
+        "    // from `exclude_memory`, which also applies to ACP and admin views.\n"
+        '    if crate::tools::delegate::current_delegate_caller_memory_free()\n'
+        '        && matches!(name, "sop_execute" | "sop_advance" | "sop_approve" | "cron_run") {\n'
         "        return false;\n"
         "    }\n"
         "    if let Some(family) = crate::tools::families::family_by_name(name) {\n"
@@ -1250,19 +1260,54 @@ fn enact_assemble_supplied_only(
         "    // name, and a family's own name is not one of theirs, so without\n"
         "    // this a memory-free run would still be offered the `memory`\n"
         "    // family — whose actions call the very tools `uses_memory =\n"
-        "    // false` removes.\n"
+        "    // false` removes. The caller-memory-free task-local is separate\n"
+        "    // from `exclude_memory`, which also applies to ACP and admin views.\n"
         "    if let Some(family) = crate::tools::families::family_by_name(name) {\n"
         "        return family\n"
         "            .members\n"
         "            .iter()\n"
         "            .any(|member| tool_allowed_in_context(member, exclude_memory, acp_delivery));\n"
         "    }\n"
-        '    if crate::tools::delegate::current_delegate_caller_memory_free() && matches!(name, "sop_execute" | "sop_advance" | "sop_approve" | "cron_run") {\n'
+        '    if crate::tools::delegate::current_delegate_caller_memory_free()\n'
+        '        && matches!(name, "sop_execute" | "sop_advance" | "sop_approve" | "cron_run") {\n'
         "        return false;\n"
         "    }\n"
         "    (!exclude_memory || !zeroclaw_tools::MEMORY_TOOL_NAMES.contains(&name))\n"
         '        && (acp_delivery || name != "deliver_file")\n'
         "}\n",
+    )
+
+    loop_file = source / "crates/zeroclaw-runtime/src/agent/loop_.rs"
+    replace_required(
+        loop_file,
+        "        // Route the per-agent tool registry through the one gated seam\n"
+        "        // (peripherals -> built-in filter -> MCP scope+gate -> skills), identical\n"
+        "        // to the behavior this path hand-rolled. `caller_allowed` carries the\n"
+        "        // run() per-run allowlist; connect_peripherals is true (execution path).\n"
+        "        let assembled = scoped::ScopedToolRegistry::assemble_prepared(\n",
+        "        // Route the per-agent tool registry through the one gated seam\n"
+        "        // (peripherals -> built-in filter -> MCP scope+gate -> skills), identical\n"
+        "        // to the behavior this path hand-rolled. `caller_allowed` carries the\n"
+        "        // run() per-run allowlist; connect_peripherals is true (execution path).\n"
+        "        let assembled = crate::tools::delegate::scope_memory_free_caller_context(\n"
+        "            memory_free,\n"
+        "            scoped::ScopedToolRegistry::assemble_prepared(\n",
+    )
+    replace_required(
+        loop_file,
+        "                mcp_registry: overrides.mcp_registry.as_ref().map(Arc::clone),\n"
+        "            },\n"
+        "            construction,\n"
+        "            supplied_tail,\n"
+        "        )\n"
+        "        .await;\n",
+        "                mcp_registry: overrides.mcp_registry.as_ref().map(Arc::clone),\n"
+        "                },\n"
+        "                construction,\n"
+        "                supplied_tail,\n"
+        "            ),\n"
+        "        )\n"
+        "        .await;\n",
     )
 
     replace_required(
@@ -1400,6 +1445,45 @@ fn enact_assemble_supplied_only(
         "        assert!(original_parent.read().iter().any(|tool| tool.name() == \"sessions\"\n"
         "            && tool.parameters_schema()[\"properties\"][\"action\"][\"enum\"]\n"
         "                .as_array().is_some_and(|actions| actions.iter().any(|action| action == \"send\"))));\n"
+        "    }\n\n"
+        "    #[tokio::test]\n"
+        "    async fn memory_free_filter_blocks_background_tools_but_acp_keeps_admin_controls() {\n"
+        "        crate::tools::delegate::scope_memory_free_caller_context(true, async {\n"
+        "            for name in [\"sop_execute\", \"sop_advance\", \"sop_approve\", \"cron_run\"] {\n"
+        "                assert!(!tool_allowed_in_context(name, true, false), \"{name} is withheld from a memory-free run\");\n"
+        "            }\n"
+        "            for (family_name, forbidden_actions) in [(\"sop\", &[\"execute\", \"advance\", \"approve\"][..]), (\"cron\", &[\"run\"][..])] {\n"
+        "                let family = crate::tools::families::family_by_name(family_name).expect(\"known family\");\n"
+        "                assert!(tool_allowed_in_context(family_name, true, false), \"safe {family_name} actions remain\");\n"
+        "                let members = family.members.iter()\n"
+        "                    .filter(|member| tool_allowed_in_context(member, true, false))\n"
+        "                    .map(|member| Arc::new(MockTool(member)) as Arc<dyn Tool>)\n"
+        "                    .collect();\n"
+        "                let actions = crate::tools::families::FamilyTool::build(family, members)\n"
+        "                    .expect(\"family has safe actions\").action_names();\n"
+        "                for action in forbidden_actions {\n"
+        "                    assert!(!actions.iter().any(|actual| actual == action), \"{family_name}.{action} is withheld from a memory-free run\");\n"
+        "                }\n"
+        "            }\n"
+        "        }).await;\n"
+        "        crate::tools::delegate::scope_memory_free_caller_context(false, async {\n"
+        "            for name in [\"sop_execute\", \"sop_advance\", \"sop_approve\", \"cron_run\"] {\n"
+        "                assert!(tool_allowed_in_context(name, true, true), \"{name} remains available in ACP\");\n"
+        "            }\n"
+        "            for (family_name, forbidden_actions) in [(\"sop\", &[\"execute\", \"advance\", \"approve\"][..]), (\"cron\", &[\"run\"][..])] {\n"
+        "                let family = crate::tools::families::family_by_name(family_name).expect(\"known family\");\n"
+        "                assert!(tool_allowed_in_context(family_name, true, true), \"{family_name} remains available in ACP\");\n"
+        "                let members = family.members.iter()\n"
+        "                    .filter(|member| tool_allowed_in_context(member, true, true))\n"
+        "                    .map(|member| Arc::new(MockTool(member)) as Arc<dyn Tool>)\n"
+        "                    .collect();\n"
+        "                let actions = crate::tools::families::FamilyTool::build(family, members)\n"
+        "                    .expect(\"family has ACP actions\").action_names();\n"
+        "                for action in forbidden_actions {\n"
+        "                    assert!(actions.iter().any(|actual| actual == action), \"{family_name}.{action} remains available in ACP\");\n"
+        "                }\n"
+        "            }\n"
+        "        }).await;\n"
         "    }\n\n"
         "    #[tokio::test]\n"
         "    async fn memory_free_assembly_scopes_delegate_without_selector() {\n"

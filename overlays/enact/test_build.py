@@ -755,6 +755,7 @@ class ConsolidatedFamilyTests(unittest.TestCase):
                 "crates/zeroclaw-runtime/src/tools/delegate.rs",
                 "crates/zeroclaw-runtime/src/tools/skill_tool.rs",
                 "crates/zeroclaw-tools/src/tool_search.rs",
+                "crates/zeroclaw-runtime/src/agent/loop_.rs",
                 "crates/zeroclaw-runtime/src/agent/agent.rs",
                 "crates/zeroclaw-gateway/src/dashboard_core.rs",
             )
@@ -763,7 +764,7 @@ class ConsolidatedFamilyTests(unittest.TestCase):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(build.ROOT / relative, target)
             build.project_enact_family_scope_filter(source)
-            api, scoped, runtime_tools, delegate_tools, skill_tools, tool_search, agent, gateway = (
+            api, scoped, runtime_tools, delegate_tools, skill_tools, tool_search, loop_file, agent, gateway = (
                 (source / relative).read_text() for relative in relatives
             )
         self.assertIn("crate::tools::families::family_by_name(name)", scoped)
@@ -782,6 +783,8 @@ class ConsolidatedFamilyTests(unittest.TestCase):
         self.assertIn("restricted_skill_family_preserves_alias_and_locked_action", skill_tools)
         self.assertIn("selected == \"mcp\"", tool_search)
         self.assertIn("canonical_mcp_selector_admits_capabilities", tool_search)
+        self.assertIn("scope_memory_free_caller_context", delegate_tools)
+        self.assertIn("scope_memory_free_caller_context(\n            memory_free,", loop_file)
         self.assertIn("tool.restricted_principal_variant()", agent)
         self.assertIn("self.tools.retain_projected", agent)
         self.assertIn("built.unfiltered_tool_arcs = tools.to_vec()", runtime_tools)
