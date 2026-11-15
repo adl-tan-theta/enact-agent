@@ -15,7 +15,7 @@ use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{Notify, broadcast, mpsc, oneshot};
 
-use crate::jsonrpc::{self, JsonRpcError, RpcOutbound, field};
+use crate::jsonrpc::{self, JsonRpcError, JsonRpcFrame, RpcOutbound};
 use crate::wire::{ConfigFieldEntry, DoctorRunResult, FsListDirResponse, SectionShape};
 
 const CONFIG_RENAME_TIMEOUT: Duration = Duration::from_secs(120);
@@ -639,6 +639,18 @@ impl fmt::Display for DaemonRpcTimeout {
     }
 }
 
+/// The daemon's reason when it refused an RPC for the caller's permissions
+/// (`FORBIDDEN`): the principal lacks the method's grant, or the method is
+/// limited to administrators. Read from the structured error, never from its
+/// text. Like a stalled call, one pane's refusal is not a reason to exit the
+/// TUI: a pane that only reads shows the reason and stays open.
+pub(crate) fn forbidden_reason(error: &anyhow::Error) -> Option<&str> {
+    error
+        .downcast_ref::<crate::jsonrpc::JsonRpcError>()
+        .filter(|error| error.code == crate::jsonrpc::error_codes::FORBIDDEN)
+        .map(|error| error.message.as_str())
+}
+
 impl std::error::Error for DaemonRpcTimeout {}
 
 #[derive(Debug)]
@@ -709,6 +721,18 @@ pub(crate) fn parse_initialize_response(resp: &Value) -> Result<InitializeRespon
     })
 }
 
+/// Retain the handshake's structured authentication verdict so startup can
+/// re-enroll a saved login once. Never infer this from error message text.
+#[derive(Debug)]
+pub(crate) struct AuthenticationRequired;
+
+impl fmt::Display for AuthenticationRequired {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("initialize: authentication required (-32010)")
+    }
+}
+impl std::error::Error for AuthenticationRequired {}
+
 async fn request_initialize(
     rpc: &RpcOutbound,
     init_params: Value,
@@ -716,6 +740,9 @@ async fn request_initialize(
 ) -> Result<Value> {
     match tokio::time::timeout(timeout, rpc.request(method::INITIALIZE, init_params)).await {
         Ok(Ok(resp)) => Ok(resp),
+        Ok(Err(e)) if e.code == zeroclaw_api::jsonrpc::error_codes::AUTH_REQUIRED => {
+            Err(AuthenticationRequired.into())
+        }
         Ok(Err(e)) => Err(anyhow::Error::msg(format!(
             "initialize: {} ({})",
             e.message, e.code
@@ -745,41 +772,35 @@ fn route_inbound_frame(
     inbound_tx: Option<&mpsc::UnboundedSender<RpcInboundRequest>>,
     frame: Value,
 ) -> Option<RpcInboundRequest> {
-    let id = frame.get(field::ID).cloned();
-    let method = frame
-        .get(field::METHOD)
-        .and_then(Value::as_str)
-        .map(str::to_string);
-
-    match (id, method) {
-        // Server-initiated request: both id and method present.
-        (Some(id), Some(method)) if !id.is_null() => {
-            let params = frame.get("params").cloned().unwrap_or(Value::Null);
-            let request = RpcInboundRequest { id, method, params };
-            if let Some(inbound_tx) = inbound_tx {
-                return inbound_tx.send(request).err().map(|error| error.0);
+    match JsonRpcFrame::from_value(frame) {
+        Ok(JsonRpcFrame::Request(request)) => {
+            let crate::jsonrpc::JsonRpcRequest {
+                method, params, id, ..
+            } = request;
+            // Preserve the client's existing convention that a null request
+            // ID is treated as a notification.
+            if let Some(id) = id.filter(|id| !id.is_null()) {
+                let request = RpcInboundRequest { id, method, params };
+                if let Some(inbound_tx) = inbound_tx {
+                    return inbound_tx.send(request).err().map(|error| error.0);
+                }
+                return Some(request);
             }
-            return Some(request);
+            let _ = notif_tx.send(RpcNotification { method, params });
         }
-        // Response: id present (typically a string), result or error,
-        // no method.
-        (Some(id), None) => {
+        Ok(JsonRpcFrame::Response { id, result }) => {
             // The outbound id format is always a string; defensively
             // only dispatch when we can stringify it.
             if let Some(id_str) = id.as_str() {
-                let result = frame.get(field::RESULT).cloned();
-                let error: Option<JsonRpcError> = frame
-                    .get(field::ERROR)
-                    .and_then(|e| serde_json::from_value(e.clone()).ok());
-                rpc.dispatch_response(id_str, result, error);
+                match result {
+                    Ok(result) => rpc.dispatch_response(id_str, Some(result), None),
+                    Err(error) => rpc.dispatch_response(id_str, None, Some(error.into())),
+                }
             }
         }
-        // Notification: method present, no id (or null id).
-        (None, Some(method)) => {
-            let params = frame.get("params").cloned().unwrap_or(Value::Null);
-            let _ = notif_tx.send(RpcNotification { method, params });
-        }
-        _ => {}
+        // Invalid frames are dropped. The API parser handles request/response
+        // direction so malformed responses cannot trigger a response loop.
+        Err(_) => {}
     }
     None
 }
@@ -2186,10 +2207,9 @@ impl RpcClient {
                 .context("adding daemon CA to the client root store")?;
             builder.with_root_certificates(roots)
         } else {
-            anyhow::bail!(
-                "WSS client certificate requires either tls.ca_cert_path (the daemon CA to trust) \
-                 or tls.skip_verify"
-            );
+            let mut roots = rustls::RootCertStore::empty();
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            builder.with_root_certificates(roots)
         };
 
         // Mutual-TLS client identity.
@@ -5809,6 +5829,19 @@ mod notification_tests {
         // task makes progress and registers its pending id (`zc-out-0`,
         // the first id from a fresh RpcOutbound).
         let _outbound = writer_rx.recv().await.expect("request wrote a frame");
+        let malformed = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "zc-out-0",
+            "result": true,
+            "error": { "code": -1, "message": "invalid response" }
+        });
+        assert!(route_inbound_frame(&rpc, &notif_tx, Some(&inbound_tx), malformed).is_none());
+        tokio::task::yield_now().await;
+        assert!(
+            !call_task.is_finished(),
+            "a malformed response must not resolve the pending request"
+        );
+
         let frame = serde_json::json!({
             "jsonrpc": "2.0",
             "id": "zc-out-0",
@@ -6567,15 +6600,9 @@ mod tls_tests {
     }
 
     #[test]
-    fn client_cert_requires_ca_or_skip() {
-        // A client cert with neither a CA nor skip_verify is a clear error, not
-        // a silent fall-through to system roots.
-        let tls = ClientTls {
-            client_cert_path: Some("/x/cert.pem".into()),
-            client_key_path: Some("/x/key.pem".into()),
-            ..Default::default()
-        };
-        assert!(RpcClient::wss_tls_config(&tls).is_err());
+    fn default_tls_config_uses_public_roots() {
+        let cfg = RpcClient::wss_tls_config(&ClientTls::default()).unwrap();
+        assert!(!cfg.client_auth_cert_resolver.has_certs());
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! JSON-RPC 2.0 transport.
 //!
-//! `apps/zerocode` keeps local ownership of its transport plumbing.
-//! Wire shape is the contract; if the daemon evolves its envelope, this file
-//! evolves to match.
+//! The shared request, response, field and error-code definitions come from
+//! `zeroclaw_api::jsonrpc`. `apps/zerocode` keeps local ownership of its
+//! transport plumbing and wraps remote errors for app-level error handling.
 //!
 //! `RpcOutbound` carries the writer channel + a pending-request map
 //! so concurrent notifications and outbound calls cannot interleave
@@ -15,53 +15,13 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{mpsc, oneshot};
+use zeroclaw_api::jsonrpc::{JsonRpcError as WireJsonRpcError, JsonRpcResponse};
 
-// ── Protocol constants ───────────────────────────────────────────
+pub use zeroclaw_api::jsonrpc::{
+    JSONRPC_VERSION, JsonRpcFrame, JsonRpcRequest, OUTBOUND_ID_PREFIX, error_codes,
+};
 
-pub const JSONRPC_VERSION: &str = "2.0";
-pub const OUTBOUND_ID_PREFIX: &str = "zc-out-";
-
-// ── Wire field name constants ────────────────────────────────────
-
-pub mod field {
-    pub const METHOD: &str = "method";
-    pub const ID: &str = "id";
-    pub const RESULT: &str = "result";
-    pub const ERROR: &str = "error";
-}
-
-// ── Wire types ───────────────────────────────────────────────────
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct JsonRpcRequest {
-    pub jsonrpc: String,
-    pub method: String,
-    #[serde(default)]
-    pub params: Value,
-    pub id: Option<Value>,
-}
-
-impl JsonRpcRequest {
-    pub fn new(method: &str, params: Value, id: Value) -> Self {
-        Self {
-            jsonrpc: JSONRPC_VERSION.to_string(),
-            method: method.to_string(),
-            params,
-            id: Some(id),
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub struct JsonRpcResponse {
-    pub jsonrpc: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<JsonRpcError>,
-    pub id: Value,
-}
-
+/// App-level wrapper for a remote JSON-RPC error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcError {
     pub code: i32,
@@ -78,15 +38,24 @@ impl std::fmt::Display for JsonRpcError {
 
 impl std::error::Error for JsonRpcError {}
 
-// ── Error codes ──────────────────────────────────────────────────
+impl From<WireJsonRpcError> for JsonRpcError {
+    fn from(error: WireJsonRpcError) -> Self {
+        Self {
+            code: error.code,
+            message: error.message,
+            data: error.data,
+        }
+    }
+}
 
-pub mod error_codes {
-    pub const METHOD_NOT_FOUND: i32 = -32601;
-    pub const INTERNAL_ERROR: i32 = -32603;
-
-    pub const SESSION_NOT_FOUND: i32 = -32000;
-    pub const SESSION_BUSY: i32 = -32002;
-    pub const INVALID_PARAMS: i32 = -32602;
+impl From<JsonRpcError> for WireJsonRpcError {
+    fn from(error: JsonRpcError) -> Self {
+        Self {
+            code: error.code,
+            message: error.message,
+            data: error.data,
+        }
+    }
 }
 
 pub const ACP_PROTOCOL_VERSION: u64 = 1;
@@ -201,10 +170,14 @@ impl RpcOutbound {
         id: Value,
         result: std::result::Result<Value, JsonRpcError>,
     ) -> bool {
+        let (result, error) = match result {
+            Ok(result) => (Some(result), None),
+            Err(error) => (None, Some(error.into())),
+        };
         let resp = JsonRpcResponse {
             jsonrpc: JSONRPC_VERSION,
-            result: result.as_ref().ok().cloned(),
-            error: result.err(),
+            result,
+            error,
             id,
         };
         match serde_json::to_string(&resp) {

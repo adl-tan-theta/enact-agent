@@ -1,0 +1,51 @@
+package zeroclaw:plugin@0.1.0;
+
+/// Plugin interface for a hook: a callback the runtime consults while a turn
+/// runs.
+///
+/// A hook sees the same events the declarative command hooks see, but it
+/// answers in-process instead of by spawning a shell. The payload is JSON, so
+/// a hook that wants a structured view of the event can have one without the
+/// interface growing a record per event.
+@unstable(feature = plugins-wit-v0)
+interface hook {
+    @unstable(feature = plugins-wit-v0)
+    use types.{json-string};
+
+    /// The answer a hook gives.
+    ///
+    /// * `continue` — carry on unchanged;
+    /// * `block` — stop the call, with the reason in `reason`;
+    /// * `rewrite` — carry on with the replacement in `arguments` (a tool
+    ///   call) or `output` (a tool result).
+    @unstable(feature = plugins-wit-v0)
+    record hook-result {
+        decision: string,
+        reason: option<string>,
+        arguments: option<json-string>,
+        output: option<string>,
+    }
+
+    /// The hook's name, as the operator's log shows it.
+    name: func() -> string;
+
+    /// Handle one hook event.
+    ///
+    /// `event` names the event — `before_tool_call`, `after_tool_call`,
+    /// `before_prompt_build` — and `payload` carries the event's JSON
+    /// description. Returns an error string when the hook could not decide;
+    /// the host then treats the hook as not having answered.
+    handle: func(event: string, payload: json-string) -> result<hook-result, string>;
+}
+
+/// A component that exports `hook` is a hook plugin.
+///
+/// The runtime registers it with the turn's hook runner, which consults it at
+/// the hook points the plugin's manifest names. A hook that answers `block`
+/// stops the call it is looking at; one that answers `rewrite` changes it.
+@unstable(feature = plugins-wit-v0)
+world hook-plugin {
+    import logging;
+    export plugin-info;
+    export hook;
+}
