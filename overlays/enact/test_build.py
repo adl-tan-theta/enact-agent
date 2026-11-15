@@ -992,7 +992,8 @@ class HookInterfaceInstallTests(unittest.TestCase):
 class ReleaseTests(unittest.TestCase):
     def test_fixed_encoded_remap_flag_preserves_spaces_without_inherited_flags(self):
         home = "/private/fixture builder/home with spaces"
-        with patch.dict(build.os.environ, {"HOME": home, "RUSTFLAGS": "--cfg inherited_flag",
+        with patch.dict(build.os.environ, {"HOME": home, "ENACT_AGENT_USE_SCCACHE": "0",
+                                         "RUSTFLAGS": "--cfg inherited_flag",
                                          "CARGO_ENCODED_RUSTFLAGS": "--cfg\x1finherited_flag",
                                          "PROVIDER_CREDENTIAL": "fixture-marker"}):
             env = build.native_build_environment("/tools/cargo", "/tools/rustc",
@@ -1002,6 +1003,31 @@ class ReleaseTests(unittest.TestCase):
         self.assertNotIn("RUSTFLAGS", env)
         self.assertNotIn("PROVIDER_CREDENTIAL", env)
         self.assertNotIn("inherited_flag", env["CARGO_ENCODED_RUSTFLAGS"])
+
+    def test_sccache_is_opt_in_and_passes_only_nonsecret_client_settings(self):
+        with patch.dict(build.os.environ, {
+            "HOME": "/private/home", "ENACT_AGENT_USE_SCCACHE": "1",
+            "SCCACHE_BASEDIRS": "/workspace/enact-agent:/workspace/zeroclaw",
+            "SCCACHE_SERVER_UDS": "/tmp/enact-agent-test.sock",
+            "SCCACHE_AZURE_CONNECTION_STRING": "secret-marker",
+        }, clear=True), patch.object(build.shutil, "which", return_value="/tools/sccache"):
+            env = build.native_build_environment("/tools/cargo", "/tools/rustc",
+                                                {"forkCommit": "1" * 40, "forkWorkingTreeDirty": False})
+
+        self.assertEqual(env["RUSTC_WRAPPER"], "/tools/sccache")
+        self.assertEqual(env["CARGO_INCREMENTAL"], "0")
+        self.assertEqual(env["SCCACHE_IDLE_TIMEOUT"], "0")
+        self.assertEqual(env["SCCACHE_BASEDIRS"], "/workspace/enact-agent:/workspace/zeroclaw")
+        self.assertEqual(env["SCCACHE_SERVER_UDS"], "/tmp/enact-agent-test.sock")
+        self.assertNotIn("SCCACHE_AZURE_CONNECTION_STRING", env)
+
+    def test_requested_sccache_fails_when_binary_is_missing(self):
+        with patch.dict(build.os.environ, {
+            "HOME": "/private/home", "ENACT_AGENT_USE_SCCACHE": "1",
+        }, clear=True), patch.object(build.shutil, "which", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "sccache was requested but is not installed"):
+                build.native_build_environment("/tools/cargo", "/tools/rustc",
+                                               {"forkCommit": "1" * 40, "forkWorkingTreeDirty": False})
 
     def test_private_home_binary_scan_fails_closed_without_printing_path(self):
         home = "/private/fixture builder/home with spaces"

@@ -56,13 +56,59 @@ This local release has no notarization or GitHub build attestation. Checksums
 establish file integrity, not publisher identity.
 
 The optional **Enact Agent native build** workflow runs only on manual dispatch
-from a committed fork ref. Ubuntu 22.04 x64, macOS 15 Intel and macOS 15 Apple
+from a protected `enact/branding` ref. Ubuntu 22.04 x64, macOS 15 Intel and Apple
 Silicon runners use the canonical workspace `rust-version`, locked dependency
-prefetch and the offline release build. Each job
+prefetch, Azure Blob sccache and the offline release build. Configure the
+repository secret `SCCACHE_AZURE_CONNECTION_STRING` and repository variable
+`SCCACHE_AZURE_BLOB_CONTAINER` to the same cache used by Enact; set
+`SCCACHE_AZURE_KEY_PREFIX` only when that shared cache uses a prefix. The
+workflow fails before building when the required secret or container variable
+is missing. Use a container-scoped, least-privilege SAS connection string, not
+an account-wide storage key. The secret is supplied only when starting the
+sccache server and is omitted from Cargo's compiler environment. Build code on
+the same runner account can inspect the server process, so protect
+`enact/branding` and run only trusted source there. Each job normalizes the
+checkout root for cross-worktree cache keys, asserts the Azure backend is
+selected, rejects cache read/write errors and reports sccache stats. Each job
 tests the extracted archive against the local fixture and uploads its target
 archive plus `SHA256SUMS` as workflow artifacts. It does not publish a GitHub
 Release or use provider credentials. Each additional target remains unqualified
 until its native job passes; no existing machine's architecture is assumed.
+
+### Use shared sccache for a local native build
+
+Install sccache and configure its Azure Blob backend in your existing sccache
+environment. Start one server per checkout so each server receives that
+worktree's normalized root while all servers share the same container and key
+prefix. Restart that checkout's server after changing the backend, container or
+prefix; sccache reads those settings at server startup. The build helper refuses
+a missing executable when caching is enabled. It omits backend credentials from
+Cargo's compiler environment, though same-user build code can inspect the
+sccache server process.
+
+```sh
+repo_root="$(cd "$(git rev-parse --show-toplevel)" && pwd -P)"
+socket_id="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])' "$repo_root")"
+cache_socket="/tmp/enact-agent-sccache-$socket_id.sock"
+SCCACHE_BASEDIRS="$repo_root" SCCACHE_SERVER_UDS="$cache_socket" \
+  SCCACHE_IDLE_TIMEOUT=0 sccache --start-server
+
+python_bin="$(command -v python3)"
+cargo_bin="$(command -v cargo)"
+rustc_bin="$(command -v rustc)"
+sccache_bin="$(command -v sccache)"
+env -i HOME="$HOME" PATH="$PATH" LANG=en_US.UTF-8 \
+  ENACT_AGENT_USE_SCCACHE=1 RUSTC_WRAPPER="$sccache_bin" CARGO_INCREMENTAL=0 \
+  SCCACHE_BASEDIRS="$repo_root" SCCACHE_SERVER_UDS="$cache_socket" SCCACHE_IDLE_TIMEOUT=0 \
+  "$python_bin" -B overlays/enact/build.py release \
+  --cargo "$cargo_bin" --rustc "$rustc_bin"
+SCCACHE_SERVER_UDS="$cache_socket" sccache --show-stats
+```
+
+Run the `sccache --start-server` command from a shell with the existing Azure
+cache configuration available. Do not pass Azure credentials to the `env -i`
+build command. The worktree shares hits only when its sccache server points to
+the same Azure account, container and key prefix as the other worktrees.
 
 Qualify the unpacked executable without real provider credentials or paid calls:
 

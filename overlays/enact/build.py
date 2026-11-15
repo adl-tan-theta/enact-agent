@@ -6599,12 +6599,31 @@ def native_build_environment(cargo, rustc, provenance):
     home = os.environ["HOME"]
     if not Path(home).is_absolute() or home == Path(home).anchor or "\x1f" in home:
         raise ValueError("Native build requires an absolute non-root HOME without flag separators")
-    return {"PATH": os.pathsep.join(dict.fromkeys([str(Path(cargo).parent), str(Path(rustc).parent),
+    env = {"PATH": os.pathsep.join(dict.fromkeys([str(Path(cargo).parent), str(Path(rustc).parent),
                                                   "/usr/bin", "/bin", "/usr/sbin", "/sbin"])),
-            "HOME": home, "LANG": "en_US.UTF-8", "ENACT_AGENT_BUILD": "1",
-            "ENACT_AGENT_BUILD_ID": provenance["forkCommit"] + ("-dirty" if provenance["forkWorkingTreeDirty"] else ""),
-            "CARGO_TARGET_DIR": str(OUT / "cargo-native"), "RUSTC": rustc,
-            "CARGO_ENCODED_RUSTFLAGS": f"--remap-path-prefix={home}={PUBLIC_BUILD_HOME}"}
+           "HOME": home, "LANG": "en_US.UTF-8", "ENACT_AGENT_BUILD": "1",
+           "ENACT_AGENT_BUILD_ID": provenance["forkCommit"] + ("-dirty" if provenance["forkWorkingTreeDirty"] else ""),
+           "CARGO_TARGET_DIR": str(OUT / "cargo-native"), "RUSTC": rustc,
+           "CARGO_ENCODED_RUSTFLAGS": f"--remap-path-prefix={home}={PUBLIC_BUILD_HOME}"}
+    use_sccache = os.environ.get("ENACT_AGENT_USE_SCCACHE", "0")
+    if use_sccache not in {"0", "1"}:
+        raise ValueError("ENACT_AGENT_USE_SCCACHE must be 0 or 1")
+    if use_sccache == "1":
+        sccache = shutil.which("sccache")
+        if not sccache:
+            raise RuntimeError("sccache was requested but is not installed or not on PATH")
+        basedirs = os.environ.get("SCCACHE_BASEDIRS", str(ROOT.resolve()))
+        basedirs_list = basedirs.split(os.pathsep)
+        if not basedirs or any(not Path(path).is_absolute() for path in basedirs_list):
+            raise ValueError("SCCACHE_BASEDIRS must contain only absolute paths")
+        default_socket_id = hashlib.sha256(str(ROOT.resolve()).encode()).hexdigest()[:16]
+        socket = os.environ.get("SCCACHE_SERVER_UDS", f"/tmp/enact-agent-sccache-{default_socket_id}.sock")
+        if not Path(socket).is_absolute() or len(os.fsencode(socket)) >= 100:
+            raise ValueError("SCCACHE_SERVER_UDS must be an absolute short Unix socket path")
+        env.update({"CARGO_INCREMENTAL": "0", "RUSTC_WRAPPER": str(Path(sccache).resolve()),
+                    "SCCACHE_BASEDIRS": basedirs, "SCCACHE_SERVER_UDS": socket,
+                    "SCCACHE_IDLE_TIMEOUT": "0"})
+    return env
 
 
 def require_private_home_absent(binary, home):
