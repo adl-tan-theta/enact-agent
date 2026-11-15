@@ -1,0 +1,245 @@
+tool_name,operation,tier,compilation,source_file,operation_basis,compiled_in_enact
+shell,run_command,Core,Always,crates/zeroclaw-runtime/src/tools/shell.rs,tool contract,true
+file_read,read,Core,Always,crates/zeroclaw-runtime/src/tools/file_read.rs,tool contract,true
+file_write,write,Core,Always,crates/zeroclaw-tools/src/file_write.rs,tool contract,true
+file_edit,edit,Core,Always,crates/zeroclaw-tools/src/file_edit.rs,tool contract,true
+glob_search,search_paths,Core,Always,crates/zeroclaw-tools/src/glob_search.rs,tool contract,true
+content_search,search_content,Core,Always,crates/zeroclaw-tools/src/content_search.rs,tool contract,true
+git_operations,add,Core,Always,crates/zeroclaw-tools/src/git_operations.rs,source action/operation enum,true
+git_operations,branch,Core,Always,crates/zeroclaw-tools/src/git_operations.rs,source action/operation enum,true
+git_operations,checkout,Core,Always,crates/zeroclaw-tools/src/git_operations.rs,source action/operation enum,true
+git_operations,commit,Core,Always,crates/zeroclaw-tools/src/git_operations.rs,source action/operation enum,true
+git_operations,diff,Core,Always,crates/zeroclaw-tools/src/git_operations.rs,source action/operation enum,true
+git_operations,drop,Core,Always,crates/zeroclaw-tools/src/git_operations.rs,source action/operation enum,true
+git_operations,list,Core,Always,crates/zeroclaw-tools/src/git_operations.rs,source action/operation enum,true
+git_operations,log,Core,Always,crates/zeroclaw-tools/src/git_operations.rs,source action/operation enum,true
+git_operations,pop,Core,Always,crates/zeroclaw-tools/src/git_operations.rs,source action/operation enum,true
+git_operations,push,Core,Always,crates/zeroclaw-tools/src/git_operations.rs,source action/operation enum,true
+git_operations,stash,Core,Always,crates/zeroclaw-tools/src/git_operations.rs,source action/operation enum,true
+git_operations,status,Core,Always,crates/zeroclaw-tools/src/git_operations.rs,source action/operation enum,true
+git_operations,worktree,Core,Always,crates/zeroclaw-tools/src/git_operations.rs,source action/operation enum,true
+memory_store,store,Core,Always,crates/zeroclaw-tools/src/memory_store.rs,tool contract,true
+memory_recall,recall,Core,Always,crates/zeroclaw-tools/src/memory_recall.rs,tool contract,true
+memory_forget,forget,Core,Always,crates/zeroclaw-tools/src/memory_forget.rs,tool contract,true
+web_fetch,fetch,Core,Always,crates/zeroclaw-tools/src/web_fetch.rs,tool contract,true
+cron_add,add,Host,Always,crates/zeroclaw-runtime/src/tools/cron_add.rs,tool contract,true
+cron_list,list,Host,Always,crates/zeroclaw-runtime/src/tools/cron_list.rs,tool contract,true
+cron_remove,remove,Host,Always,crates/zeroclaw-runtime/src/tools/cron_remove.rs,tool contract,true
+cron_update,update,Host,Always,crates/zeroclaw-runtime/src/tools/cron_update.rs,tool contract,true
+cron_run,run,Host,Always,crates/zeroclaw-runtime/src/tools/cron_run.rs,tool contract,true
+cron_runs,list_runs,Host,Always,crates/zeroclaw-runtime/src/tools/cron_runs.rs,tool contract,true
+schedule,add,Host,Always,crates/zeroclaw-runtime/src/tools/schedule.rs,source action/operation enum,true
+schedule,cancel,Host,Always,crates/zeroclaw-runtime/src/tools/schedule.rs,source action/operation enum,true
+schedule,create,Host,Always,crates/zeroclaw-runtime/src/tools/schedule.rs,source action/operation enum,true
+schedule,get,Host,Always,crates/zeroclaw-runtime/src/tools/schedule.rs,source action/operation enum,true
+schedule,list,Host,Always,crates/zeroclaw-runtime/src/tools/schedule.rs,source action/operation enum,true
+schedule,once,Host,Always,crates/zeroclaw-runtime/src/tools/schedule.rs,source action/operation enum,true
+schedule,pause,Host,Always,crates/zeroclaw-runtime/src/tools/schedule.rs,source action/operation enum,true
+schedule,remove,Host,Always,crates/zeroclaw-runtime/src/tools/schedule.rs,source action/operation enum,true
+schedule,resume,Host,Always,crates/zeroclaw-runtime/src/tools/schedule.rs,source action/operation enum,true
+memory_export,export,Host,Always,crates/zeroclaw-tools/src/memory_export.rs,tool contract,true
+memory_purge,purge,Host,Always,crates/zeroclaw-tools/src/memory_purge.rs,tool contract,true
+spawn_subagent,spawn,Host,Always,crates/zeroclaw-runtime/src/tools/spawn_subagent.rs,tool contract,true
+delegate,delegate,Host,Always,crates/zeroclaw-runtime/src/tools/delegate.rs,source action enum,true
+delegate,check_result,Host,Always,crates/zeroclaw-runtime/src/tools/delegate.rs,source action enum,true
+delegate,list_results,Host,Always,crates/zeroclaw-runtime/src/tools/delegate.rs,source action enum,true
+delegate,cancel_task,Host,Always,crates/zeroclaw-runtime/src/tools/delegate.rs,source action enum,true
+delegate,await_sessions,Host,Always,crates/zeroclaw-runtime/src/tools/delegate.rs,source action enum,true
+send_message_to_peer,send,Host,Always,crates/zeroclaw-runtime/src/tools/send_message_to_peer.rs,tool contract,true
+wait,wait,Host,Always,crates/zeroclaw-runtime/src/tools/wait_task.rs,tool contract,true
+checkpoint,checkpoint,Host,Always,crates/zeroclaw-runtime/src/tools/checkpoint.rs,tool contract,true
+rewind,rewind,Host,Always,crates/zeroclaw-runtime/src/tools/rewind.rs,tool contract,true
+plan_mode,status,Host,Always,crates/zeroclaw-runtime/src/tools/plan_mode.rs,source action enum,true
+plan_mode,plan,Host,Always,crates/zeroclaw-runtime/src/tools/plan_mode.rs,source action enum,true
+plan_execute,execute,Host,Always,crates/zeroclaw-runtime/src/tools/plan_execute.rs,tool contract,true
+model_switch,get,Host,Always,crates/zeroclaw-runtime/src/tools/model_switch.rs,source action/operation enum,true
+model_switch,list_model_providers,Host,Always,crates/zeroclaw-runtime/src/tools/model_switch.rs,source action/operation enum,true
+model_switch,list_models,Host,Always,crates/zeroclaw-runtime/src/tools/model_switch.rs,source action/operation enum,true
+model_switch,set,Host,Always,crates/zeroclaw-runtime/src/tools/model_switch.rs,source action/operation enum,true
+model_routing_config,get,Host,Always,crates/zeroclaw-tools/src/model_routing_config.rs,source action/operation enum,true
+model_routing_config,list_hints,Host,Always,crates/zeroclaw-tools/src/model_routing_config.rs,source action/operation enum,true
+model_routing_config,remove_agent,Host,Always,crates/zeroclaw-tools/src/model_routing_config.rs,source action/operation enum,true
+model_routing_config,remove_scenario,Host,Always,crates/zeroclaw-tools/src/model_routing_config.rs,source action/operation enum,true
+model_routing_config,set_default,Host,Always,crates/zeroclaw-tools/src/model_routing_config.rs,source action/operation enum,true
+model_routing_config,upsert_agent,Host,Always,crates/zeroclaw-tools/src/model_routing_config.rs,source action/operation enum,true
+model_routing_config,upsert_scenario,Host,Always,crates/zeroclaw-tools/src/model_routing_config.rs,source action/operation enum,true
+proxy_config,apply_env,Host,Always,crates/zeroclaw-tools/src/proxy_config.rs,source action/operation enum,true
+proxy_config,clear_env,Host,Always,crates/zeroclaw-tools/src/proxy_config.rs,source action/operation enum,true
+proxy_config,disable,Host,Always,crates/zeroclaw-tools/src/proxy_config.rs,source action/operation enum,true
+proxy_config,get,Host,Always,crates/zeroclaw-tools/src/proxy_config.rs,source action/operation enum,true
+proxy_config,list_services,Host,Always,crates/zeroclaw-tools/src/proxy_config.rs,source action/operation enum,true
+proxy_config,set,Host,Always,crates/zeroclaw-tools/src/proxy_config.rs,source action/operation enum,true
+ask_user,ask,Host,Always,crates/zeroclaw-tools/src/ask_user.rs,tool contract,true
+escalate_to_human,escalate,Host,Always,crates/zeroclaw-tools/src/escalate.rs,tool contract,true
+reaction,add,Host,Always,crates/zeroclaw-tools/src/reaction.rs,source action/operation enum,true
+reaction,remove,Host,Always,crates/zeroclaw-tools/src/reaction.rs,source action/operation enum,true
+poll,poll,Host,Always,crates/zeroclaw-tools/src/poll.rs,tool contract,true
+channel_room,create_room,Host,Always,crates/zeroclaw-tools/src/channel_room.rs,source action enum,true
+channel_room,invite_user,Host,Always,crates/zeroclaw-tools/src/channel_room.rs,source action enum,true
+send_via,send,Host,Always,crates/zeroclaw-tools/src/send_via.rs,tool contract,true
+git_forge,describe,Host,Always,crates/zeroclaw-tools/src/git_forge.rs,source schema description,true
+git_forge,typed_resource_action,Host,Always,crates/zeroclaw-tools/src/git_forge.rs,source schema description,true
+git_forge,raw,Host,Always,crates/zeroclaw-tools/src/git_forge.rs,source schema description,true
+sessions_current,current,Host,Always,crates/zeroclaw-tools/src/sessions.rs,tool contract,true
+sessions_list,list,Host,Always,crates/zeroclaw-tools/src/sessions.rs,tool contract,true
+sessions_history,history,Host,Always,crates/zeroclaw-tools/src/sessions.rs,tool contract,true
+sessions_send,send,Host,Always,crates/zeroclaw-tools/src/sessions.rs,tool contract,true
+sop_list,list,Host,Always,crates/zeroclaw-runtime/src/tools/sop_list.rs,tool contract,true
+sop_execute,execute,Host,Always,crates/zeroclaw-runtime/src/tools/sop_execute.rs,tool contract,true
+sop_advance,advance,Host,Always,crates/zeroclaw-runtime/src/tools/sop_advance.rs,tool contract,true
+sop_approve,approve,Host,Always,crates/zeroclaw-runtime/src/tools/sop_approve.rs,tool contract,true
+sop_status,status,Host,Always,crates/zeroclaw-runtime/src/tools/sop_status.rs,tool contract,true
+sop_workshop,propose,Host,Always,crates/zeroclaw-runtime/src/tools/sop_workshop.rs,source action enum,true
+sop_workshop,capture_run,Host,Always,crates/zeroclaw-runtime/src/tools/sop_workshop.rs,source action enum,true
+sop_workshop,list,Host,Always,crates/zeroclaw-runtime/src/tools/sop_workshop.rs,source action enum,true
+sop_workshop,inspect,Host,Always,crates/zeroclaw-runtime/src/tools/sop_workshop.rs,source action enum,true
+sop_workshop,apply,Host,Always,crates/zeroclaw-runtime/src/tools/sop_workshop.rs,source action enum,true
+sop_workshop,reject,Host,Always,crates/zeroclaw-runtime/src/tools/sop_workshop.rs,source action enum,true
+sop_workshop,quarantine,Host,Always,crates/zeroclaw-runtime/src/tools/sop_workshop.rs,source action enum,true
+read_skill,read,Host,Always,crates/zeroclaw-runtime/src/tools/read_skill.rs,tool contract,true
+learn,learn,Host,Always,crates/zeroclaw-runtime/src/tools/learn.rs,tool contract,true
+skills_list,list,Host,Always,crates/zeroclaw-runtime/src/tools/skill_manage.rs,tool contract,true
+skill_view,view,Host,Always,crates/zeroclaw-runtime/src/tools/skill_manage.rs,tool contract,true
+skill_manage,patch,Host,Always,crates/zeroclaw-runtime/src/tools/skill_manage.rs,source action enum,true
+skill_manage,write_file,Host,Always,crates/zeroclaw-runtime/src/tools/skill_manage.rs,source action enum,true
+skill_manage,archive,Host,Always,crates/zeroclaw-runtime/src/tools/skill_manage.rs,source action enum,true
+TodoWrite,write_task_list,Host,Always,crates/zeroclaw-runtime/src/tools/todo_write.rs,tool contract,true
+canvas,clear,Host,Always,crates/zeroclaw-tools/src/canvas.rs,source action/operation enum,true
+canvas,eval,Host,Always,crates/zeroclaw-tools/src/canvas.rs,source action/operation enum,true
+canvas,render,Host,Always,crates/zeroclaw-tools/src/canvas.rs,source action/operation enum,true
+canvas,snapshot,Host,Always,crates/zeroclaw-tools/src/canvas.rs,source action/operation enum,true
+deliver_file,deliver,Host,Always,crates/zeroclaw-runtime/src/tools/deliver_file.rs,tool contract,true
+llm_task,run_subtask,Host,Always,crates/zeroclaw-tools/src/llm_task.rs,tool contract,true
+#claude_code,run_cli,Host,OptIn(OptInTool::ClaudeCode),crates/zeroclaw-tools/src/claude_code.rs,tool contract,false
+#codex_cli,run_cli,Host,OptIn(OptInTool::CodexCli),crates/zeroclaw-tools/src/codex_cli.rs,tool contract,false
+#gemini_cli,run_cli,Host,OptIn(OptInTool::GeminiCli),crates/zeroclaw-tools/src/gemini_cli.rs,tool contract,false
+#opencode_cli,run_cli,Host,OptIn(OptInTool::OpenCodeCli),crates/zeroclaw-tools/src/opencode_cli.rs,tool contract,false
+a2a_discover,discover,Host,Always,crates/zeroclaw-tools/src/a2a_client.rs,tool contract,true
+a2a_send,send,Host,Always,crates/zeroclaw-tools/src/a2a_client.rs,tool contract,true
+a2a_get_task,get_task,Host,Always,crates/zeroclaw-tools/src/a2a_client.rs,tool contract,true
+a2a_cancel,cancel,Host,Always,crates/zeroclaw-tools/src/a2a_client.rs,tool contract,true
+file_download,download,Host,Always,crates/zeroclaw-tools/src/file_download.rs,tool contract,true
+security_ops,alert_stats,Host,Always,crates/zeroclaw-runtime/src/tools/security_ops.rs,source action/operation enum,true
+security_ops,generate_report,Host,Always,crates/zeroclaw-runtime/src/tools/security_ops.rs,source action/operation enum,true
+security_ops,list_playbooks,Host,Always,crates/zeroclaw-runtime/src/tools/security_ops.rs,source action/operation enum,true
+security_ops,parse_vulnerability,Host,Always,crates/zeroclaw-runtime/src/tools/security_ops.rs,source action/operation enum,true
+security_ops,run_playbook,Host,Always,crates/zeroclaw-runtime/src/tools/security_ops.rs,source action/operation enum,true
+security_ops,triage_alert,Host,Always,crates/zeroclaw-runtime/src/tools/security_ops.rs,source action/operation enum,true
+execute_pipeline,execute,Host,Always,crates/zeroclaw-tools/src/pipeline.rs,tool contract,true
+tool_search,search,Host,Always,crates/zeroclaw-tools/src/tool_search.rs,tool contract,true
+mcp_resources,list,Host,Always,crates/zeroclaw-tools/src/mcp_resources_tool.rs,source action enum,true
+mcp_resources,read,Host,Always,crates/zeroclaw-tools/src/mcp_resources_tool.rs,source action enum,true
+mcp_prompts,list,Host,Always,crates/zeroclaw-tools/src/mcp_prompts_tool.rs,source action enum,true
+mcp_prompts,get,Host,Always,crates/zeroclaw-tools/src/mcp_prompts_tool.rs,source action enum,true
+calculator,calculate,Optional,Always,crates/zeroclaw-tools/src/calculator.rs,tool contract,true
+weather,lookup,Optional,External,crates/zeroclaw-tools/src/weather_tool.rs,tool contract,true
+pushover,notify,Optional,External,crates/zeroclaw-tools/src/pushover.rs,tool contract,true
+screenshot,capture,Optional,External,crates/zeroclaw-tools/src/screenshot.rs,tool contract,true
+image_info,inspect,Optional,Always,crates/zeroclaw-tools/src/image_info.rs,tool contract,true
+browser_open,open,Optional,External,crates/zeroclaw-tools/src/browser_open.rs,tool contract,true
+browser,click,Optional,External,crates/zeroclaw-tools/src/browser.rs,source action/operation enum,true
+browser,close,Optional,External,crates/zeroclaw-tools/src/browser.rs,source action/operation enum,true
+browser,fill,Optional,External,crates/zeroclaw-tools/src/browser.rs,source action/operation enum,true
+browser,find,Optional,External,crates/zeroclaw-tools/src/browser.rs,source action/operation enum,true
+browser,get_text,Optional,External,crates/zeroclaw-tools/src/browser.rs,source action/operation enum,true
+browser,get_title,Optional,External,crates/zeroclaw-tools/src/browser.rs,source action/operation enum,true
+browser,get_url,Optional,External,crates/zeroclaw-tools/src/browser.rs,source action/operation enum,true
+browser,hover,Optional,External,crates/zeroclaw-tools/src/browser.rs,source action/operation enum,true
+browser,is_visible,Optional,External,crates/zeroclaw-tools/src/browser.rs,source action/operation enum,true
+browser,key_press,Optional,External,crates/zeroclaw-tools/src/browser.rs,source action/operation enum,true
+browser,key_type,Optional,External,crates/zeroclaw-tools/src/browser.rs,source action/operation enum,true
+browser,mouse_click,Optional,External,crates/zeroclaw-tools/src/browser.rs,source action/operation enum,true
+browser,mouse_drag,Optional,External,crates/zeroclaw-tools/src/browser.rs,source action/operation enum,true
+browser,mouse_move,Optional,External,crates/zeroclaw-tools/src/browser.rs,source action/operation enum,true
+browser,open,Optional,External,crates/zeroclaw-tools/src/browser.rs,source action/operation enum,true
+browser,press,Optional,External,crates/zeroclaw-tools/src/browser.rs,source action/operation enum,true
+browser,screen_capture,Optional,External,crates/zeroclaw-tools/src/browser.rs,source action/operation enum,true
+browser,screenshot,Optional,External,crates/zeroclaw-tools/src/browser.rs,source action/operation enum,true
+browser,scroll,Optional,External,crates/zeroclaw-tools/src/browser.rs,source action/operation enum,true
+browser,snapshot,Optional,External,crates/zeroclaw-tools/src/browser.rs,source action/operation enum,true
+browser,type,Optional,External,crates/zeroclaw-tools/src/browser.rs,source action/operation enum,true
+browser,wait,Optional,External,crates/zeroclaw-tools/src/browser.rs,source action/operation enum,true
+browser_delegate,delegate,Optional,External,crates/zeroclaw-tools/src/browser_delegate.rs,tool contract,true
+text_browser,browse,Optional,External,crates/zeroclaw-tools/src/text_browser.rs,tool contract,true
+http_request,request,Optional,Always,crates/zeroclaw-tools/src/http_request.rs,tool contract,true
+web_search_tool,search,Optional,External,crates/zeroclaw-tools/src/web_search_tool.rs,tool contract,true
+#notion,create_page,Optional,OptIn(OptInTool::Notion),crates/zeroclaw-tools/src/notion_tool.rs,source action/operation enum,false
+#notion,query_database,Optional,OptIn(OptInTool::Notion),crates/zeroclaw-tools/src/notion_tool.rs,source action/operation enum,false
+#notion,read_page,Optional,OptIn(OptInTool::Notion),crates/zeroclaw-tools/src/notion_tool.rs,source action/operation enum,false
+#notion,search,Optional,OptIn(OptInTool::Notion),crates/zeroclaw-tools/src/notion_tool.rs,source action/operation enum,false
+#notion,update_page,Optional,OptIn(OptInTool::Notion),crates/zeroclaw-tools/src/notion_tool.rs,source action/operation enum,false
+#jira,comment_ticket,Optional,OptIn(OptInTool::Jira),crates/zeroclaw-tools/src/jira_tool.rs,source action/operation enum,false
+#jira,create_ticket,Optional,OptIn(OptInTool::Jira),crates/zeroclaw-tools/src/jira_tool.rs,source action/operation enum,false
+#jira,get_ticket,Optional,OptIn(OptInTool::Jira),crates/zeroclaw-tools/src/jira_tool.rs,source action/operation enum,false
+#jira,list_projects,Optional,OptIn(OptInTool::Jira),crates/zeroclaw-tools/src/jira_tool.rs,source action/operation enum,false
+#jira,list_transitions,Optional,OptIn(OptInTool::Jira),crates/zeroclaw-tools/src/jira_tool.rs,source action/operation enum,false
+#jira,myself,Optional,OptIn(OptInTool::Jira),crates/zeroclaw-tools/src/jira_tool.rs,source action/operation enum,false
+#jira,search_tickets,Optional,OptIn(OptInTool::Jira),crates/zeroclaw-tools/src/jira_tool.rs,source action/operation enum,false
+#jira,transition_ticket,Optional,OptIn(OptInTool::Jira),crates/zeroclaw-tools/src/jira_tool.rs,source action/operation enum,false
+#linkedin,comment,Optional,OptIn(OptInTool::LinkedIn),crates/zeroclaw-tools/src/linkedin.rs,source action/operation enum,false
+#linkedin,create_post,Optional,OptIn(OptInTool::LinkedIn),crates/zeroclaw-tools/src/linkedin.rs,source action/operation enum,false
+#linkedin,delete_post,Optional,OptIn(OptInTool::LinkedIn),crates/zeroclaw-tools/src/linkedin.rs,source action/operation enum,false
+#linkedin,get_content_strategy,Optional,OptIn(OptInTool::LinkedIn),crates/zeroclaw-tools/src/linkedin.rs,source action/operation enum,false
+#linkedin,get_engagement,Optional,OptIn(OptInTool::LinkedIn),crates/zeroclaw-tools/src/linkedin.rs,source action/operation enum,false
+#linkedin,get_profile,Optional,OptIn(OptInTool::LinkedIn),crates/zeroclaw-tools/src/linkedin.rs,source action/operation enum,false
+#linkedin,list_posts,Optional,OptIn(OptInTool::LinkedIn),crates/zeroclaw-tools/src/linkedin.rs,source action/operation enum,false
+#linkedin,react,Optional,OptIn(OptInTool::LinkedIn),crates/zeroclaw-tools/src/linkedin.rs,source action/operation enum,false
+#composio,connect,Optional,OptIn(OptInTool::Composio),crates/zeroclaw-tools/src/composio.rs,source action/operation enum,false
+#composio,connected_accounts,Optional,OptIn(OptInTool::Composio),crates/zeroclaw-tools/src/composio.rs,source action/operation enum,false
+#composio,execute,Optional,OptIn(OptInTool::Composio),crates/zeroclaw-tools/src/composio.rs,source action/operation enum,false
+#composio,list,Optional,OptIn(OptInTool::Composio),crates/zeroclaw-tools/src/composio.rs,source action/operation enum,false
+#composio,list_accounts,Optional,OptIn(OptInTool::Composio),crates/zeroclaw-tools/src/composio.rs,source action/operation enum,false
+#google_workspace,service/resource/method,Optional,OptIn(OptInTool::GoogleWorkspace),crates/zeroclaw-tools/src/google_workspace.rs,tool schema,false
+#microsoft365,calendar_event_create,Optional,OptIn(OptInTool::Microsoft365),crates/zeroclaw-tools/src/microsoft365/mod.rs,source action/operation enum,false
+#microsoft365,calendar_event_delete,Optional,OptIn(OptInTool::Microsoft365),crates/zeroclaw-tools/src/microsoft365/mod.rs,source action/operation enum,false
+#microsoft365,calendar_events_list,Optional,OptIn(OptInTool::Microsoft365),crates/zeroclaw-tools/src/microsoft365/mod.rs,source action/operation enum,false
+#microsoft365,mail_list,Optional,OptIn(OptInTool::Microsoft365),crates/zeroclaw-tools/src/microsoft365/mod.rs,source action/operation enum,false
+#microsoft365,mail_send,Optional,OptIn(OptInTool::Microsoft365),crates/zeroclaw-tools/src/microsoft365/mod.rs,source action/operation enum,false
+#microsoft365,onedrive_download,Optional,OptIn(OptInTool::Microsoft365),crates/zeroclaw-tools/src/microsoft365/mod.rs,source action/operation enum,false
+#microsoft365,onedrive_list,Optional,OptIn(OptInTool::Microsoft365),crates/zeroclaw-tools/src/microsoft365/mod.rs,source action/operation enum,false
+#microsoft365,sharepoint_search,Optional,OptIn(OptInTool::Microsoft365),crates/zeroclaw-tools/src/microsoft365/mod.rs,source action/operation enum,false
+#microsoft365,teams_message_list,Optional,OptIn(OptInTool::Microsoft365),crates/zeroclaw-tools/src/microsoft365/mod.rs,source action/operation enum,false
+#microsoft365,teams_message_send,Optional,OptIn(OptInTool::Microsoft365),crates/zeroclaw-tools/src/microsoft365/mod.rs,source action/operation enum,false
+#project_intel,draft_update,Optional,OptIn(OptInTool::ProjectIntel),crates/zeroclaw-tools/src/project_intel.rs,source action/operation enum,false
+#project_intel,effort_estimate,Optional,OptIn(OptInTool::ProjectIntel),crates/zeroclaw-tools/src/project_intel.rs,source action/operation enum,false
+#project_intel,risk_scan,Optional,OptIn(OptInTool::ProjectIntel),crates/zeroclaw-tools/src/project_intel.rs,source action/operation enum,false
+#project_intel,sprint_summary,Optional,OptIn(OptInTool::ProjectIntel),crates/zeroclaw-tools/src/project_intel.rs,source action/operation enum,false
+#project_intel,status_report,Optional,OptIn(OptInTool::ProjectIntel),crates/zeroclaw-tools/src/project_intel.rs,source action/operation enum,false
+#report_template,render_template,Optional,OptIn(OptInTool::ProjectIntel),crates/zeroclaw-tools/src/report_template_tool.rs,tool contract,false
+#claude_code_runner,run_cli,Optional,OptIn(OptInTool::ClaudeCodeRunner),crates/zeroclaw-tools/src/claude_code_runner.rs,tool contract,false
+backup,create,Optional,Always,crates/zeroclaw-tools/src/backup_tool.rs,source parameter enum,true
+backup,list,Optional,Always,crates/zeroclaw-tools/src/backup_tool.rs,source parameter enum,true
+backup,verify,Optional,Always,crates/zeroclaw-tools/src/backup_tool.rs,source parameter enum,true
+backup,restore,Optional,Always,crates/zeroclaw-tools/src/backup_tool.rs,source parameter enum,true
+data_management,retention_status,Optional,Always,crates/zeroclaw-tools/src/data_management.rs,source parameter enum,true
+data_management,purge,Optional,Always,crates/zeroclaw-tools/src/data_management.rs,source parameter enum,true
+data_management,stats,Optional,Always,crates/zeroclaw-tools/src/data_management.rs,source parameter enum,true
+cloud_ops,architecture_review,Optional,Always,crates/zeroclaw-tools/src/cloud_ops.rs,source action/operation enum,true
+cloud_ops,assess_migration,Optional,Always,crates/zeroclaw-tools/src/cloud_ops.rs,source action/operation enum,true
+cloud_ops,cost_analysis,Optional,Always,crates/zeroclaw-tools/src/cloud_ops.rs,source action/operation enum,true
+cloud_ops,review_iac,Optional,Always,crates/zeroclaw-tools/src/cloud_ops.rs,source action/operation enum,true
+cloud_patterns,list,Optional,Always,crates/zeroclaw-tools/src/cloud_patterns.rs,source action/operation enum,true
+cloud_patterns,match,Optional,Always,crates/zeroclaw-tools/src/cloud_patterns.rs,source action/operation enum,true
+image_gen,generate,Optional,External,crates/zeroclaw-tools/src/image_gen.rs,tool contract,true
+file_upload,upload,Optional,Always,crates/zeroclaw-tools/src/file_upload.rs,tool contract,true
+file_upload_bundle,upload_bundle,Optional,Always,crates/zeroclaw-tools/src/file_upload_bundle.rs,tool contract,true
+discord_search,search,Optional,Always,crates/zeroclaw-tools/src/discord_search.rs,tool contract,true
+email_search,search,Optional,External,crates/zeroclaw-tools/src/email_search.rs,tool contract,true
+email_read,read,Optional,External,crates/zeroclaw-tools/src/email_read.rs,tool contract,true
+knowledge,capture,Optional,Always,crates/zeroclaw-tools/src/knowledge_tool.rs,source action enum,true
+knowledge,search,Optional,Always,crates/zeroclaw-tools/src/knowledge_tool.rs,source action enum,true
+knowledge,relate,Optional,Always,crates/zeroclaw-tools/src/knowledge_tool.rs,source action enum,true
+knowledge,suggest,Optional,Always,crates/zeroclaw-tools/src/knowledge_tool.rs,source action enum,true
+knowledge,expert_find,Optional,Always,crates/zeroclaw-tools/src/knowledge_tool.rs,source action enum,true
+knowledge,lessons_extract,Optional,Always,crates/zeroclaw-tools/src/knowledge_tool.rs,source action enum,true
+knowledge,graph_stats,Optional,Always,crates/zeroclaw-tools/src/knowledge_tool.rs,source action enum,true
+knowledge,graph_neighbors,Optional,Always,crates/zeroclaw-tools/src/knowledge_tool.rs,source action enum,true
+knowledge,client_network,Optional,Always,crates/zeroclaw-tools/src/knowledge_tool.rs,source action enum,true
+knowledge,interaction_log,Optional,Always,crates/zeroclaw-tools/src/knowledge_tool.rs,source action enum,true
+compose,assemble,Host,Always,crates/zeroclaw-runtime/src/tools/compose.rs,tool contract,true
+expand,retrieve,Host,Always,crates/zeroclaw-runtime/src/tools/expand.rs,tool contract,true
+ast_grep,search,Host,Always,crates/zeroclaw-runtime/src/tools/ast_grep.rs,tool contract,true
+ast_edit,rewrite,Host,Always,crates/zeroclaw-runtime/src/tools/ast_grep.rs,tool contract,true
+callgraph,analyse,Host,Always,crates/zeroclaw-runtime/src/tools/callgraph.rs,tool contract,true
+graph,dependencies,Host,Always,crates/zeroclaw-runtime/src/tools/callgraph.rs,tool contract,true
+radar,report,Host,Always,crates/zeroclaw-runtime/src/tools/radar.rs,tool contract,true

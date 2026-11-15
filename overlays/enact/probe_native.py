@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import socket
 import subprocess
@@ -21,6 +22,8 @@ class Fixture(BaseHTTPRequestHandler):
     mcp_methods = []
     missing_mcp_calls = 0
     preexecuted_calls = 0
+    delegation_started = False
+    delegation_check_requested = False
 
     def log_message(self, *_args):
         pass
@@ -96,7 +99,25 @@ class Fixture(BaseHTTPRequestHandler):
         type(self).tools_offered = [t["function"]["name"] for t in body.get("tools", [])]
         message = {"role": "assistant", "content": "native fixture completed"}
         finish = "stop"
-        if type(self).calls == 1:
+        transcript = json.dumps(body.get("messages", []))
+        if "background delegation probe" in transcript and not type(self).delegation_started:
+            type(self).delegation_started = True
+            message = {"role": "assistant", "content": "", "tool_calls": [{"index": 0,
+                "id": "fixture-delegate-call", "type": "function", "function": {
+                "name": "delegate", "arguments": json.dumps({"agent": "reviewer",
+                    "prompt": "Return delegated fixture result.", "background": True})}}]}
+            finish = "tool_calls"
+        elif ("background delegation probe" in transcript
+              and (not type(self).delegation_check_requested or '"status": "running"' in transcript)):
+            task_id = re.search(r"task_id:\s*([0-9a-f-]{36})", transcript)
+            assert task_id, transcript
+            type(self).delegation_check_requested = True
+            message = {"role": "assistant", "content": "", "tool_calls": [{"index": 0,
+                "id": "fixture-check-result", "type": "function", "function": {
+                "name": "delegate", "arguments": json.dumps({"action": "await_sessions",
+                    "task_ids": [task_id.group(1)], "timeout_ms": 120000})}}]}
+            finish = "tool_calls"
+        elif type(self).calls == 1:
             message = {"role": "assistant", "content": "", "tool_calls": [{"index": 0,
                 "id": "fixture-call", "type": "function", "function": {
                 "name": "shell", "arguments": json.dumps({"command": "printf enact-probe-must-not-execute"})}}]}
@@ -178,6 +199,7 @@ auto_approve = ["file_read"]
 model_provider = "ollama.fixture"
 risk_profile = "probe"
 runtime_profile = "probe"
+delegates = ["reviewer"]
 mcp_bundles = ["probe"]
 [agents.probe.workspace]
 path = "{workspace}"
@@ -187,12 +209,40 @@ backend = "none"
 level = "supervised"
 workspace_only = true
 allowed_commands = ["printf"]
-allowed_tools = ["shell", "fixture__echo", "missing__echo"]
+allowed_tools = ["shell", "fixture__echo", "missing__echo", "delegate", "spawn_subagent"]
 always_ask = ["shell"]
-auto_approve = ["fixture__echo"]
+auto_approve = ["fixture__echo", "delegate"]
+delegation_policy = {{ mode = "allow" }}
+[agents.reviewer]
+model_provider = "ollama.fixture"
+risk_profile = "reviewer"
+runtime_profile = "probe"
+[agents.reviewer.workspace]
+path = "{workspace}"
+[agents.reviewer.memory]
+backend = "none"
+[risk_profiles.reviewer]
+level = "supervised"
+workspace_only = true
+allowed_tools = ["file_read"]
+auto_approve = ["file_read"]
+[agents.capabilities]
+model_provider = "ollama.fixture"
+risk_profile = "capabilities"
+runtime_profile = "probe"
+[agents.capabilities.workspace]
+path = "{workspace}"
+[agents.capabilities.memory]
+backend = "none"
+[risk_profiles.capabilities]
+level = "supervised"
+workspace_only = true
+allowed_tools = ["file_read", "weather"]
 [runtime_profiles.probe]
 agentic = true
 max_tool_iterations = 1
+[tools]
+optional = ["delegate", "spawn_subagent", "weather"]
 [mcp]
 enabled = true
 deferred_loading = false
@@ -230,7 +280,15 @@ servers = ["fixture", "missing"]
                         connection.sendall((json.dumps({"jsonrpc": "2.0", "method": method,
                             "params": params, "id": request_id}) + "\n").encode())
                     def receive():
-                        line = frames.readline()
+                        try:
+                            line = frames.readline()
+                        except TimeoutError as error:
+                            log_tail = (private / "daemon.log").read_text(errors="replace")[-4000:]
+                            raise TimeoutError(
+                                f"native RPC response timed out after provider_calls={Fixture.calls}, "
+                                f"mcp_calls={Fixture.mcp_methods}, notifications={notifications[-12:]}; "
+                                f"daemon log tail:\n{log_tail}"
+                            ) from error
                         if not line:
                             raise RuntimeError("native socket closed unexpectedly")
                         frame = json.loads(line)
@@ -260,6 +318,9 @@ servers = ["fixture", "missing"]
                     assert set(inventory) == {"session_id", "tools"}, inventory
                     assert inventory["session_id"] == session, inventory
                     assert "shell" in inventory["tools"], inventory
+                    assert "delegate" in inventory["tools"], inventory
+                    assert "spawn_subagent" in inventory["tools"], inventory
+                    assert "weather" not in inventory["tools"], inventory
                     assert "fixture__echo" in inventory["tools"], inventory
                     assert "missing__echo" not in inventory["tools"], inventory
                     assert Fixture.calls == 0, "inventory invoked the model provider"
@@ -270,7 +331,7 @@ servers = ["fixture", "missing"]
                     approval = None
                     completed = None
                     prompt_result = False
-                    approval_acknowledged = False
+                    approval_acknowledged = True
                     tool_results = []
                     while completed is None or not prompt_result or not approval_acknowledged:
                         frame = receive()
@@ -292,11 +353,11 @@ servers = ["fixture", "missing"]
                                     "request_id": event["request_id"], "decision": "reject"}, "approval")
                             if event.get("type") == "turn_complete":
                                 completed = event
-                    assert approval_acknowledged, "approval rejection was not acknowledged"
                     assert [(event["name"], event["success"]) for event in tool_results] == [
                         ("shell", False), ("fixture__echo", True), ("fixture__echo", False)], tool_results
                     assert "denied" in tool_results[0]["raw_output"].lower(), tool_results
-                    assert approval is not None, "approval event did not cross native RPC"
+                    assert approval is None, "headless daemon unexpectedly found an approver"
+                    assert "no operator decision" in tool_results[0]["raw_output"].lower(), tool_results
                     assert completed["outcome"] == "completed", completed
                     assert completed["client_turn_generation"] == 1
                     assert completed["content"] == "native fixture completed", completed
@@ -335,14 +396,115 @@ servers = ["fixture", "missing"]
                     assert preexecuted_complete["outcome"] == "completed", preexecuted_complete
                     assert Fixture.preexecuted_calls == 1, Fixture.preexecuted_calls
                     request("session/close", {"session_id": preexecuted_session}, "preexecuted-close")
+                    delegation = request("session/new", {"agent_alias": "probe", "exclude_memory": True}, "delegation-new")
+                    delegation_session = delegation["session_id"]
+                    send("session/prompt", {"session_id": delegation_session,
+                        "prompt": "Run the background delegation probe.",
+                        "client_turn_generation": 1}, "delegation-prompt")
+                    delegation_complete = None
+                    delegation_tool_results = []
+                    delegation_ack = False
+                    while delegation_complete is None or not delegation_ack:
+                        frame = receive()
+                        if frame.get("id") == "delegation-prompt":
+                            assert "error" not in frame, frame
+                            delegation_ack = True
+                        if frame.get("method") == "session/update":
+                            event = frame["params"]
+                            if event.get("type") == "tool_result":
+                                delegation_tool_results.append(event)
+                            if event.get("type") == "turn_complete":
+                                delegation_complete = event
+                    assert len(delegation_tool_results) >= 2, delegation_tool_results
+                    assert delegation_tool_results[0]["name"] == "delegate", delegation_tool_results
+                    assert delegation_tool_results[0]["success"] is True, delegation_tool_results
+                    assert "task_id:" in delegation_tool_results[0]["raw_output"], delegation_tool_results
+                    completed_check = next((event for event in delegation_tool_results[1:] if event["success"] is True), None)
+                    assert completed_check is not None, delegation_tool_results
+                    assert completed_check["name"] == "delegate", delegation_tool_results
+                    delegated_result = json.loads(completed_check["raw_output"])
+                    assert delegated_result["status"] == "complete", delegated_result
+                    assert delegated_result["completed"] == 1, delegated_result
+                    assert "native fixture completed" in delegated_result["results"][0]["output"], delegated_result
+                    assert delegation_complete["outcome"] == "completed", delegation_complete
+                    request("session/close", {"session_id": delegation_session}, "delegation-close")
+                    calls_before_inventory = Fixture.calls
+                    capability_session = request("session/new", {
+                        "agent_alias": "capabilities", "exclude_memory": True}, "capability-new")["session_id"]
+                    capabilities = request("session/tools", {
+                        "session_id": capability_session}, "capability-tools")
+                    assert set(capabilities["tools"]) == {"file_read", "weather"}, capabilities
+                    assert Fixture.calls == calls_before_inventory, "capability inventory invoked the model provider"
+                    request("session/close", {"session_id": capability_session}, "capability-close")
+                    calls_before_deferred_inventory = Fixture.calls
+                    process.send_signal(signal.SIGTERM)
+                    process.wait(timeout=15)
+                    endpoint.unlink(missing_ok=True)
+                    deferred_endpoint = private / "deferred-agent.sock"
+                    config_file = config / "config.toml"
+                    config_text = config_file.read_text()
+                    if config_text.count("deferred_loading = false") != 1:
+                        raise AssertionError("deferred MCP probe config anchor drifted")
+                    config_file.write_text(config_text.replace("deferred_loading = false",
+                                                               "deferred_loading = true", 1))
+                    env["ENACT_AGENT_SOCKET"] = str(deferred_endpoint)
+                    with (private / "deferred-daemon.log").open("wb") as deferred_log:
+                        process = subprocess.Popen([str(binary), "daemon"], cwd=workspace, env=env,
+                                                   stdout=deferred_log, stderr=deferred_log)
+                        deadline = time.monotonic() + 30
+                        while not deferred_endpoint.exists():
+                            if process.poll() is not None:
+                                raise RuntimeError(
+                                    f"deferred daemon exited {process.returncode}: "
+                                    f"{(private / 'deferred-daemon.log').read_text()}"
+                                )
+                            if time.monotonic() > deadline:
+                                raise TimeoutError("deferred native socket readiness exceeded 30 seconds")
+                            time.sleep(0.05)
+                        with socket.socket(socket.AF_UNIX) as deferred_connection:
+                            deferred_connection.settimeout(30)
+                            deferred_connection.connect(str(deferred_endpoint))
+                            deferred_frames = deferred_connection.makefile("rb")
+
+                            def deferred_request(method, params, request_id):
+                                deferred_connection.sendall((json.dumps({
+                                    "jsonrpc": "2.0", "method": method, "params": params,
+                                    "id": request_id}) + "\n").encode())
+                                while True:
+                                    line = deferred_frames.readline()
+                                    if not line:
+                                        raise RuntimeError("deferred RPC socket closed unexpectedly")
+                                    frame = json.loads(line)
+                                    if frame.get("id") == request_id:
+                                        if "error" in frame:
+                                            raise RuntimeError(f"{method}: {frame['error']}")
+                                        return frame["result"]
+
+                            deferred_request("initialize", {"protocol_version": 1, "env": {}},
+                                             "deferred-init")
+                            deferred_session = deferred_request(
+                                "session/new", {"agent_alias": "probe", "exclude_memory": True},
+                                "deferred-new")["session_id"]
+                            deferred_inventory = deferred_request(
+                                "session/tools", {"session_id": deferred_session}, "deferred-tools")
+                            assert "tool_search" in deferred_inventory["tools"], deferred_inventory
+                            assert "fixture__echo" not in deferred_inventory["tools"], deferred_inventory
+                            assert Fixture.calls == calls_before_deferred_inventory, \
+                                "deferred inventory invoked the model provider"
+                            deferred_request("session/close", {"session_id": deferred_session},
+                                             "deferred-close")
                     print(json.dumps({"protocol": "enact-agent-local-rpc", "version": 1,
                         "transport": "unix-ndjson", "auth": "isolated local peer, no credentials",
                         "serverVersion": initialized["server_version"],
                         "checks": ["native ENACT_AGENT_CONFIG_DIR", "native ENACT_AGENT_SOCKET",
                                    "native ENACT_AGENT schema override", "initialize string ID", "health", "session/new", "session/prompt",
                                    "session/tools instantiated MCP inventory", "configured unavailable MCP absent",
+                                   "compiled external adapter inventory respects per-agent allowlists",
+                                   "delegation policy and subagent tools admitted",
+                                   "background delegation and result pull",
                                    "session/tools no provider invocation", "closed session inventory rejected",
-                                   "approval_request", "session/approve reject", "turn_complete generation",
+                                   "deferred MCP tool_search registration",
+                                   "approval fail-closed without approver", "excluded shell", "turn_complete generation",
                                    "actual rejected tool success false", "actual MCP execution success true",
                                    "actual MCP error success false", "provider preexecution success null",
                                    "session/state", "session/close"],
@@ -351,11 +513,13 @@ servers = ["fixture", "missing"]
                         "unsupported": ["provider-preexecuted tools with unknown success; Enact must reject null"],
                         "toolsOffered": Fixture.tools_offered,
                         "constructedTools": inventory["tools"],
+                        "capabilityTools": capabilities["tools"],
+                        "deferredTools": deferred_inventory["tools"],
                         "mcpMethods": Fixture.mcp_methods,
                         "unavailableMcpAttempts": Fixture.missing_mcp_calls,
                         "toolOutcomes": [{"name": event["name"], "success": event["success"]}
                                          for event in tool_results],
-                        "socketMode": oct(endpoint.stat().st_mode & 0o777)}, indent=2))
+                        "socketMode": oct(deferred_endpoint.stat().st_mode & 0o777)}, indent=2))
     finally:
         if process and process.poll() is None:
             process.send_signal(signal.SIGTERM)

@@ -29,6 +29,10 @@ successful compile as proof that a release asset exists or passes its fixture.
 
 - Preserve upstream `origin`, the `enact` fork remote, licenses, copyrights and
   `NOTICE`. Work on review branches; never edit or push directly to `master`.
+- Open pull requests against `enact/branding` in `adl-tan-theta/enact-agent`.
+  Never open a pull request against `zeroclaw-labs/zeroclaw` upstream: upstream is
+  the source that is reviewed and merged in, never the destination of a change.
+  Upstream's own `master` rules govern upstream's repository, not this fork.
 - Keep fork-only native branding/RPC adaptations in `build.py`, not tracked
   `src/` or `crates/` Rust. Upstream merges may update upstream Rust normally.
 - `prepare` deletes/recreates `target/enact/source/`. Never hand-edit this output
@@ -60,6 +64,33 @@ Upstream may change. There is no guarantee that future merges cannot break the
 fork. Checked single-match anchors and constructor counts fail closed on known
 drift; they do not prove semantic compatibility. An anchor failure blocks release
 until reviewed adaptation and target requalification pass.
+
+## Related repositories
+
+| Repository | Branch/role |
+| --- | --- |
+| `adl-tan-theta/enact-agent` (remote `enact`) | this fork; `enact/branding` is the integration branch and the base for every pull request |
+| `zeroclaw-labs/zeroclaw` (remote `origin`) | upstream source; read, review and merge in — never push or open a pull request here |
+| `adl-tan-theta/enact-tools` | workspace repo for the tool-surface review, the report generators and the `enact-bridge` host adapter |
+
+The workspace repo is host-facing and lives outside the product tree: it installs
+into Codex CLI and Claude Code, mirrors their own policies, and generates the
+canonical registry from this repo's overlay CSV. Changes to the product's tool
+surface still land here, in the overlay — not in the workspace repo.
+
+## Pull requests
+
+Base every pull request on `enact/branding`:
+
+```sh
+gh pr create --repo adl-tan-theta/enact-agent \
+  --base enact/branding --head <branch> \
+  --title "feat(<scope>): <description>"
+```
+
+Titles must satisfy `scripts/check-pr-title.sh` (`type(scope): description`, with
+a scope). Always pass `--repo adl-tan-theta/enact-agent` explicitly: `gh` resolves
+the repository from the `origin` remote otherwise, which is upstream.
 
 ## Install the published headless release
 
@@ -206,6 +237,40 @@ Check actual light/dark UI output for presentation changes and relevant upstream
 web checks for broader changes. Docs-only changes use existing quality/link gates
 with explicit `DOCS_FILES` for these outside-book files; default discovery can
 skip them. Do not report a skipped gate as file validation.
+
+### Verifying the plugin hook guest
+
+The hook world is a guest contract, so the host side can be proven without a
+guest. Proving the guest side needs a real component: the `wasm32-wasip2`
+target, a guest crate outside this repository (so the product's lockfile does
+not move), and the prepared tree's WIT — the hook interface is installed into
+the prepared tree, not tracked in the repository's `wit/`.
+
+```sh
+rustup target add wasm32-wasip2
+python3 overlays/enact/build.py prepare          # installs wit/v0/hook.wit
+```
+
+The guest crate is a `cdylib` that binds the `hook-plugin` world from
+`<repo>/target/enact/source/wit/v0` and implements `plugin-info` plus `hook`.
+`wit-bindgen` 0.51 generates the guest traits without a receiver, so the
+implementations are `fn name() -> String` and
+`fn handle(event: String, payload: String) -> Result<HookResult, String>`.
+The `logging` import needs no implementation: a guest that does not provide it
+still builds.
+
+```sh
+cargo build --target wasm32-wasip2 --manifest-path <guest>/Cargo.toml
+```
+
+The host then admits the component through `PluginHost::hook_plugin_details`,
+builds the scope with `PluginInstanceScope::from_manifest(&manifest,
+PluginCapability::Hook, binding, grants)`, loads it with `WasmHook::from_wasm`,
+and calls the `HookHandler` methods. A guest that answers `rewrite` must have
+its answer applied to the tool result, and the host must read the guest's
+`name` export. Keep the guest outside the repository: a nested crate is not a
+workspace member, but a workspace member would change `Cargo.lock`, which this
+overlay does not do.
 
 Build a clean approved commit with Python 3.11+, the declared Rust toolchain
 already installed in rustup, and cached locked dependencies. Resolve tool paths
