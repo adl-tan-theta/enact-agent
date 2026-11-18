@@ -1,5 +1,10 @@
 name: Enact Agent native build
 on:
+  # The native release build runs on every push to the integration branch, so
+  # a change that breaks the build is caught here rather than at the next
+  # manual dispatch. The manual trigger stays for a deliberate rebuild.
+  push:
+    branches: [enact/branding]
   workflow_dispatch:
 permissions:
   contents: read
@@ -129,3 +134,26 @@ jobs:
             ${{ runner.temp }}/enact-release/*.tar.gz
             ${{ runner.temp }}/enact-release/SHA256SUMS
           if-no-files-found: error
+
+  contract:
+    # The tool contract is what a host reads to learn the fork's vocabulary.
+    # It is generated from the family table, so it cannot drift from the
+    # registry — but only if a stale copy cannot be committed. This job
+    # regenerates it and fails when the committed file differs.
+    if: github.ref == 'refs/heads/enact/branding'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.12'
+      - name: The committed tool contract is current
+        run: python3 overlays/enact/contract/generate_contract.py --check
+      - name: The committed operations inventory is current
+        run: python3 overlays/enact/contract/generate_operations_csv.py --check

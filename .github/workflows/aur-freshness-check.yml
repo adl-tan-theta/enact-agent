@@ -1,5 +1,16 @@
 name: AUR Freshness Check
 
+# Disabled in the Enact fork.
+#
+# This workflow compares the upstream `zeroclaw` AUR package against the
+# upstream stable release. The fork does not publish an AUR package and its
+# releases carry `enact-agent-v<version>` tags, so the comparison always
+# reports the package as stale. It fails on every run for that reason.
+#
+# The disposition is explicit rather than silent: if an AUR package is added
+# for the Enact distribution, this workflow must be re-enabled and repointed
+# at that package and at the fork's release tags.
+
 # Verifies that the AUR package actually reflects the current stable release.
 #
 # The publish job is fire-and-forget: if it fails, nothing re-checks, so the
@@ -10,8 +21,6 @@ name: AUR Freshness Check
 # this check is the backstop that turns a silent miss into a visible one.
 
 on:
-  schedule:
-    - cron: "41 7 * * 1"
   workflow_dispatch:
   workflow_call:
 

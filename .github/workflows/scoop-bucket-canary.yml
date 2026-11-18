@@ -1,5 +1,17 @@
 name: Scoop Bucket Canary
 
+# Disabled in the Enact fork.
+#
+# This workflow rehearses the publish path for the upstream `zeroclaw` Scoop
+# bucket, using an account-bound token the fork does not hold. It fails on
+# every run for that reason.
+#
+# The Enact distribution is not published through Scoop: it ships through the
+# GitHub releases in adl-tan-theta/enact-agent, which the install script and
+# the Homebrew tap point at. The disposition is explicit rather than silent:
+# if a Scoop bucket is added for the Enact distribution, this workflow must
+# be re-enabled and repointed at it.
+
 # Rehearses the Scoop publish path against the current stable release without
 # touching the bucket.
 #
@@ -18,10 +30,6 @@ name: Scoop Bucket Canary
 # publish by rotating the credential and rerunning the publisher.
 
 on:
-  schedule:
-    # Mondays, early UTC: a failure lands at the start of the week rather than
-    # in the middle of a release.
-    - cron: "23 7 * * 1"
   workflow_dispatch:
 
 concurrency:
