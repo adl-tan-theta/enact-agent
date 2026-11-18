@@ -1542,7 +1542,15 @@ jobs:
     needs: [master-debounce]
     if: ${{ !cancelled() && needs.master-debounce.result != 'failure' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # The 45-minute ceiling was sized upstream, on an 8-vCPU Blacksmith
+    # runner. This fork's fleet is 4-vCPU GitHub-hosted, and run 44388445456
+    # measured the job at 45m25s: 35 minutes for setup, clippy and 1694
+    # tests, then the artifact ratchet was killed with 9 minutes of work
+    # still to do. The ratchet no longer rebuilds the `xtask` binary to
+    # resolve a feature list the job has already resolved (that cost 5m08s
+    # on this runner), and the ceiling is raised to carry the remaining
+    # ratchet work plus headroom for a slower runner.
+    timeout-minutes: 60
     env:
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -1576,7 +1584,7 @@ jobs:
       - name: Artifact ratchet (CLI-only build)
         run: |
           cargo build --locked -p zeroclaw --bin zeroclaw --no-default-features --features "${{ steps.features.outputs.list }}"
-          bash scripts/ci/cli_only_ratchet.sh run x86_64-unknown-linux-gnu target/debug/zeroclaw
+          bash scripts/ci/cli_only_ratchet.sh run x86_64-unknown-linux-gnu target/debug/zeroclaw "${{ steps.features.outputs.list }}"
 
   memory-postgres-test:
     name: Test (PostgreSQL Memory)
