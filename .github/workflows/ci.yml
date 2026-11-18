@@ -1566,6 +1566,8 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Test parallel runtime scope classifier
         run: bash scripts/ci/parallel_runtime_test_scope.test.sh
+      - name: Test parallel runtime gate flake absorption
+        run: bash scripts/ci/parallel_runtime_test_gate_flake.test.sh
       - name: Detect parallel runtime test changes
         id: changed
         shell: bash
