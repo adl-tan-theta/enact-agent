@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Compare the tool surface of two published Enact Agent releases.
 
-Both releases publish a `manifest.json` inside their archive. That manifest
-records the binary's identity and provenance, and a release built from the
-tool-surface convergence also records the family contract it advertises. The
-comparison therefore needs no network access and no running daemon: it reads
-the two manifests and reports what changed between them.
+Both releases publish a `manifest.json` inside their archive that records the
+binary's identity and provenance. The tool *surface* itself lives in the
+generated contract: `overlays/enact/contract/tool-contract.json` for a build
+of this tree, and the registry a released binary was built from for a build
+of an older tree. A release published before the tool-surface convergence
+carries no contract at all, and the comparison reports that absence rather
+than silently reporting "no change".
 
 Usage:
     compare_releases.py OLD_MANIFEST NEW_MANIFEST
@@ -13,7 +15,9 @@ Usage:
                          --new-tag enact-agent-v0.9.0-enact.2
 
 The `--old-tag` / `--new-tag` form downloads the archives from the fork's
-GitHub Releases and extracts the manifests.
+GitHub Releases and extracts the manifests. The contract for the new build
+is read from this repository, and the old build's contract is reported as
+absent unless a path to it is given.
 """
 
 from __future__ import annotations
@@ -29,6 +33,8 @@ from typing import Any
 
 REPO = "adl-tan-theta/enact-agent"
 RELEASE_BASE = f"https://github.com/{REPO}/releases/download"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CONTRACT_PATH = REPO_ROOT / "overlays" / "enact" / "contract" / "tool-contract.json"
 
 
 def fetch_manifest(tag: str, target: str, workdir: Path) -> dict[str, Any]:
@@ -54,18 +60,46 @@ def load_manifest(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
-def families_of(manifest: dict[str, Any]) -> dict[str, Any]:
-    """The family contract a manifest advertises, empty when it has none.
+def families_of(contract: dict[str, Any] | None) -> dict[str, Any]:
+    """The family contract, empty when the build carries none.
 
-    A release built before the tool-surface convergence records no family
-    contract at all. That absence is the most important difference the
-    comparison reports, so it is represented as an empty mapping rather than
-    as a missing key.
+    A release built before the tool-surface convergence has no contract at
+    all. That absence is the most important difference the comparison
+    reports, so it is represented as an empty mapping rather than as a
+    missing key.
     """
-    return manifest.get("families", {}) or {}
+    if not contract:
+        return {}
+    return contract.get("families", {}) or {}
 
 
-def report(old: dict[str, Any], new: dict[str, Any]) -> int:
+def canonical_of(contract: dict[str, Any] | None) -> list[str]:
+    if not contract:
+        return []
+    return list(contract.get("canonical_tools", []) or [])
+
+
+def legacy_of(contract: dict[str, Any] | None) -> list[str]:
+    if not contract:
+        return []
+    return list(contract.get("legacy_members", []) or [])
+
+
+def load_contract(path: Path | None) -> dict[str, Any] | None:
+    """Read a generated contract, or None when there is none to read."""
+    if path is None:
+        return None
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text())
+
+
+def report(
+    old: dict[str, Any],
+    new: dict[str, Any],
+    old_contract: dict[str, Any] | None = None,
+    new_contract: dict[str, Any] | None = None,
+) -> int:
     old_bin = old.get("binary", {})
     new_bin = new.get("binary", {})
 
@@ -86,15 +120,41 @@ def report(old: dict[str, Any], new: dict[str, Any]) -> int:
     print(f"  overlay   {old_overlay.get('sha256', '?')[:16]}...  ->  "
           f"{new_overlay.get('sha256', '?')[:16]}...")
 
-    old_families = families_of(old)
-    new_families = families_of(new)
+    old_canonical = canonical_of(old_contract)
+    new_canonical = canonical_of(new_contract)
+    old_legacy = legacy_of(old_contract)
+    new_legacy = legacy_of(new_contract)
+
+    print()
+    print("Tool surface")
+    if old_contract is None and new_contract is None:
+        print("  neither build carries a tool contract")
+    else:
+        if old_contract is None:
+            print(f"  contract  absent  ->  present")
+        else:
+            print(f"  contract  present  ->  {'present' if new_contract else 'absent'}")
+        print(f"  canonical {len(old_canonical)}  ->  {len(new_canonical)} tools")
+        print(f"  legacy    {len(old_legacy)}  ->  {len(new_legacy)} members")
+        gained = sorted(set(new_canonical) - set(old_canonical))
+        removed = sorted(set(old_canonical) - set(new_canonical))
+        if gained:
+            print(f"  added     {', '.join(gained)}")
+        if removed:
+            print(f"  removed   {', '.join(removed)}")
+        dropped_legacy = sorted(set(old_legacy) - set(new_legacy))
+        if dropped_legacy:
+            print(f"  legacy names withdrawn: {', '.join(dropped_legacy)}")
+
+    old_families = families_of(old_contract)
+    new_families = families_of(new_contract)
     old_names = set(old_families)
     new_names = set(new_families)
 
     print()
     print("Family contract")
     if not old_families and not new_families:
-        print("  neither release advertises a family contract")
+        print("  neither build advertises a family contract")
     else:
         if not old_families:
             print(f"  added     {len(new_names)} families: {', '.join(sorted(new_names))}")
@@ -132,7 +192,7 @@ def report(old: dict[str, Any], new: dict[str, Any]) -> int:
         else:
             print()
             print("Action changes")
-            print("  none: every family advertises the same actions in both releases")
+            print("  none: every family advertises the same actions in both builds")
 
     return 0
 
@@ -148,6 +208,17 @@ def main() -> int:
         default="aarch64-apple-darwin",
         help="release target whose manifest to read (default: aarch64-apple-darwin)",
     )
+    parser.add_argument(
+        "--old-contract",
+        type=Path,
+        help="the old build's tool contract; absent means it carried none",
+    )
+    parser.add_argument(
+        "--new-contract",
+        type=Path,
+        default=CONTRACT_PATH,
+        help=f"the new build's tool contract (default: {CONTRACT_PATH.relative_to(REPO_ROOT)})",
+    )
     args = parser.parse_args()
 
     if args.old_tag and args.new_tag:
@@ -155,12 +226,19 @@ def main() -> int:
             workdir = Path(name)
             old = fetch_manifest(args.old_tag, args.target, workdir)
             new = fetch_manifest(args.new_tag, args.target, workdir)
-        return report(old, new)
+        return report(
+            old,
+            new,
+            load_contract(args.old_contract),
+            load_contract(args.new_contract),
+        )
 
     if args.old_manifest and args.new_manifest:
         return report(
             load_manifest(args.old_manifest),
             load_manifest(args.new_manifest),
+            load_contract(args.old_contract),
+            load_contract(args.new_contract),
         )
 
     parser.error(
