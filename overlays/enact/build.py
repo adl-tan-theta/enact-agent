@@ -104,8 +104,20 @@ def _family_table(families_rs):
     The table decides which operations a family advertises and whether a
     member takes its operation as an `action` argument, so it is checked
     against the operations inventory and against the tools themselves.
+
+    Only the `FAMILIES` table itself is read. The module also carries the
+    tests, and a later mention of a family's name must not shadow the
+    table's own entry.
     """
     text = families_rs.read_text()
+    begin = text.find("pub const FAMILIES: &[Family] = &[")
+    if begin < 0:
+        raise RuntimeError("Upstream overlay drift: the family table is missing")
+    finish = text.find("\n];", begin)
+    if finish < 0:
+        raise RuntimeError("Upstream overlay drift: the family table is not closed")
+    table = text[begin:finish]
+
     members = {}
     pattern = re.compile(
         r"Member\s*\{\s*tool:\s*\"([^\"]+)\",\s*ops:\s*&\[(.*?)\],\s*"
@@ -118,10 +130,12 @@ def _family_table(families_rs):
     families = {}
     for match in re.finditer(
         r'name:\s*"([^"]+)",\s*\n\s*description:\s*"[^"]*",\s*\n\s*members:\s*&\[(.*?)\]',
-        text,
+        table,
         re.S,
     ):
         families[match.group(1)] = re.findall(r'"([^"]+)"', match.group(2))
+    if not families:
+        raise RuntimeError("Upstream overlay drift: the family table declares no families")
     return families, members
 
 
@@ -205,6 +219,12 @@ def project_enact_family_inventory(source):
     family: upstream's own inventory gate requires every compiled row to
     register under the maximal config, and a family without its members
     never registers.
+
+    The members keep their rows: the inventory records what the runtime
+    registers, and a member stays registered so a call that names it is
+    still parseable and dispatchable. What the members lose is the
+    *advertisement* — the deferred catalogue, the `tool_search` index and
+    the `session/tools` list carry the family names, not the members'.
     """
     inventory = source / "crates/zeroclaw-tools/src/inventory.rs"
     families, _ = _family_table(ROOT / "overlays/enact/native/tools/families.rs")
@@ -1923,10 +1943,15 @@ def check_enact_family_members(source):
     """Fail closed if the family table and the tools it describes disagree.
 
     The family table is the one place that says which operations a
-    consolidated tool advertises. If it drifts from the operations
-    inventory, the native surface and the canonical registry the bridge
-    publishes would offer different actions under the same name — so the
-    drift is a build failure, not a runtime surprise.
+    consolidated tool advertises. If it drifts from the tools themselves, the
+    native surface and the canonical registry the bridge publishes would
+    offer different actions under the same name — so the drift is a build
+    failure, not a runtime surprise.
+
+    The operations inventory lists the *advertised* surface, so it holds a
+    row per family action rather than a row per member. The members are
+    checked against their own source: the tool they came from is the
+    evidence that the action exists.
     """
     families_rs = ROOT / "overlays/enact/native/tools/families.rs"
     families, members = _family_table(families_rs)
@@ -1951,32 +1976,27 @@ def check_enact_family_members(source):
             f"only in the members: {sorted(set(members) - set(claimed))}"
         )
 
+    # The member's own source file is where its operations are declared.
+    # The operations inventory lists the advertised surface, so it holds a
+    # row per family action rather than a row per member; the member map
+    # says which file each member came from.
     operations_csv = ROOT / "overlays/enact/zeroclaw-tools-operations.csv"
-    ops_by_tool = {}
+    member_csv = ROOT / "overlays/enact/contract/family-members.csv"
     source_by_tool = {}
-    for line in operations_csv.read_text().splitlines()[1:]:
+    for line in member_csv.read_text().splitlines()[1:]:
         if not line.strip():
             continue
         parts = line.split(",")
-        tool = parts[0].lstrip("#")
-        ops_by_tool.setdefault(tool, [])
-        if parts[1] not in ops_by_tool[tool]:
-            ops_by_tool[tool].append(parts[1])
-        source_by_tool.setdefault(tool, parts[4])
+        source_by_tool[parts[0].lstrip("#")] = parts[1]
 
     for tool, (ops, action_backed) in sorted(members.items()):
-        csv_ops = ops_by_tool.get(tool)
-        if csv_ops is None:
+        relative = source_by_tool.get(tool)
+        if relative is None:
             raise RuntimeError(
-                f"Upstream overlay drift: {tool} is a family member but is not "
-                "in the operations inventory"
+                f"Upstream overlay drift: the source of {tool} is not in the "
+                "family member map"
             )
-        if csv_ops != ops:
-            raise RuntimeError(
-                f"Upstream overlay drift: the family table lists {ops} for {tool} "
-                f"but the operations inventory lists {csv_ops}"
-            )
-        tool_source = source / source_by_tool[tool]
+        tool_source = source / relative
         if not tool_source.is_file():
             raise RuntimeError(f"Upstream overlay drift: the source of {tool} is missing")
         declares_action = _tool_declares_action(tool_source)
@@ -1993,6 +2013,85 @@ def check_enact_family_members(source):
                 raise RuntimeError(
                     f"Upstream overlay drift: {tool} does not offer the operations {missing}"
                 )
+
+    # The advertised inventory must list every family action, and no member
+    # name: the members are not advertised any more.
+    ops_by_tool = {}
+    for line in operations_csv.read_text().splitlines()[1:]:
+        if not line.strip():
+            continue
+        parts = line.split(",")
+        tool = parts[0].lstrip("#")
+        ops_by_tool.setdefault(tool, [])
+        if parts[1] not in ops_by_tool[tool]:
+            ops_by_tool[tool].append(parts[1])
+
+    for family, names in sorted(families.items()):
+        if family not in ops_by_tool:
+            raise RuntimeError(
+                f"Upstream overlay drift: the family {family} is not in the "
+                "operations inventory"
+            )
+    for tool in sorted(claimed):
+        if tool in ops_by_tool:
+            raise RuntimeError(
+                f"Upstream overlay drift: {tool} is a legacy member but is still "
+                "listed in the operations inventory"
+            )
+
+
+def _api_canonical_families():
+    """The family table the API layer publishes.
+
+    The API layer holds the table because every crate that keys on a tool
+    name depends on it and none of them may depend on the runtime, where
+    the families are assembled. It must agree with the overlay's family
+    module: one vocabulary, two views of it.
+
+    The table is read from the overlay's copy, which is the source of truth
+    for the prepared tree — the API crate's module is copied in from there.
+    """
+    text = (ROOT / "overlays/enact/native/api/canonical_tools.rs").read_text()
+    families = {}
+    for match in re.finditer(
+        r'CanonicalFamily\s*\{\s*name:\s*"([^"]+)",\s*\n\s*members:\s*&\[(.*?)\],',
+        text,
+        re.S,
+    ):
+        families[match.group(1)] = re.findall(r'"([^"]+)"', match.group(2))
+    if not families:
+        raise RuntimeError(
+            "Upstream overlay drift: the API layer declares no canonical families"
+        )
+    return families
+
+
+def check_enact_canonical_family_agreement():
+    """Fail closed if the API table and the overlay's family table disagree.
+
+    The API table is what every crate resolves a tool name through; the
+    overlay's table is what the runtime assembles the families from. If they
+    disagree, a name resolves to one family on one side of the crate
+    boundary and another on the other — so the drift is a build failure.
+    """
+    families, _ = _family_table(ROOT / "overlays/enact/native/tools/families.rs")
+    api_families = _api_canonical_families()
+    if families != api_families:
+        only_overlay = {
+            name: members
+            for name, members in families.items()
+            if api_families.get(name) != members
+        }
+        only_api = {
+            name: members
+            for name, members in api_families.items()
+            if families.get(name) != members
+        }
+        raise RuntimeError(
+            "Upstream overlay drift: the API canonical-family table and the "
+            f"overlay's family module disagree; overlay: {only_overlay}; "
+            f"API: {only_api}"
+        )
 
 
 def enact_canonical_tool_names(csv_path=None, families_path=None):
@@ -2016,6 +2115,27 @@ def enact_canonical_tool_names(csv_path=None, families_path=None):
     return listed | families
 
 
+def enact_family_member_names(families_path=None):
+    """The legacy member names the families replace.
+
+    A member stays registered in the runtime — a call that names it is still
+    parseable and dispatchable — so the built-in inventory keeps listing it.
+    What the member loses is the advertisement: the model learns the family
+    name, and the family is the one tool the surface offers.
+    """
+    families_path = families_path or (ROOT / "overlays/enact/native/tools/families.rs")
+    members = set()
+    for block in re.finditer(
+        r"Member\s*\{\s*tool:\s*\"([^\"]+)\",", families_path.read_text()
+    ):
+        members.add(block.group(1))
+    if not members:
+        raise RuntimeError(
+            "Upstream overlay drift: no family members found in the overlay"
+        )
+    return members
+
+
 def check_enact_tool_inventory(source, csv_path=None, families_path=None):
     """Fail closed if the built-in inventory and the canonical tool set disagree.
 
@@ -2023,6 +2143,13 @@ def check_enact_tool_inventory(source, csv_path=None, families_path=None):
     rows, so upstream drift, a stale operations inventory and a missing family
     row all fail the build instead of shipping a registry that disagrees with
     the canonical registry the bridge publishes.
+
+    The inventory records what the runtime *registers*, and the canonical set
+    records what the build *advertises*. The two differ by exactly the legacy
+    member names: those stay registered so an old call still dispatches, and
+    they are not advertised because the family carries the same capability
+    under the name the model should learn. Every advertised name must be
+    inventoried, and the only inventoried names beyond them are the members.
     """
     inventory = source / "crates/zeroclaw-tools/src/inventory.rs"
     names = re.findall(r'^\s+name: "([^"]+)",$', inventory.read_text(), flags=re.MULTILINE)
@@ -2032,14 +2159,21 @@ def check_enact_tool_inventory(source, csv_path=None, families_path=None):
             f"({len(names)} rows, {len(set(names))} names)"
         )
     expected = enact_canonical_tool_names(csv_path, families_path)
+    members = enact_family_member_names(families_path)
     registered = set(names)
-    if registered != expected:
-        missing = sorted(expected - registered)
-        extra = sorted(registered - expected)
+    missing = sorted(expected - registered)
+    if missing:
         raise RuntimeError(
-            "Enact tool inventory drift: the built-in inventory and the canonical "
-            f"tool set disagree; missing from the inventory: {missing}; "
-            f"registered but not listed: {extra}"
+            "Enact tool inventory drift: the built-in inventory is missing tools "
+            f"the canonical set advertises: {missing}"
+        )
+    extra = sorted(registered - expected)
+    unexpected = [name for name in extra if name not in members]
+    if unexpected:
+        raise RuntimeError(
+            "Enact tool inventory drift: the built-in inventory lists tools the "
+            f"canonical set does not advertise, and which are not family members: "
+            f"{unexpected}"
         )
 
 
@@ -3403,9 +3537,29 @@ def project_session_tools(source):
         let expected_generation = self.capture_session_access(&req.session_id).await?;
         let agent = self.ctx.sessions.get_agent(&req.session_id).await
             .ok_or_else(|| rpc_err(SESSION_NOT_FOUND, "Live session not found"))?;
-        let tools = {
+        let (tools, families) = {
             let agent = agent.lock().await;
-            agent.tool_names().into_iter().map(str::to_string).collect()
+            let tools = agent.tool_names().into_iter().map(str::to_string).collect();
+            // The contract comes from the same assembled registry the names
+            // come from, never from a config projection: a family the session
+            // does not hold must not be advertised.
+            let families = crate::tools::families::family_contracts(agent.tool_names_owned())
+                .into_iter()
+                .map(|contract| {
+                    let action_count = contract.action_count();
+                    SessionFamilyContract {
+                        name: contract.name.to_string(),
+                        actions: contract.actions,
+                        action_count,
+                        deprecated_members: contract
+                            .deprecated_members
+                            .iter()
+                            .map(|member| (*member).to_string())
+                            .collect(),
+                    }
+                })
+                .collect();
+            (tools, families)
         };
         let grants = self.recheck_authority_after_admission(Method::SessionTools)?;
         let scope = self.scoped_principal_id_from(grants.as_ref());
@@ -3416,7 +3570,7 @@ def project_session_tools(source):
         )
         .await?;
         self.ensure_session_incarnation(&req.session_id, expected_generation).await?;
-        to_result(SessionToolsResult { session_id: req.session_id, tools })
+        to_result(SessionToolsResult { session_id: req.session_id, tools, families })
     }
 
 '''
@@ -3427,8 +3581,17 @@ def project_session_tools(source):
     # dispatcher resolves it through `use crate::rpc::types::*`.
     replace_required(proto_types,
                      "rpc_type! {\n    pub struct SessionStateResult {",
+                     "rpc_type! {\n    pub struct SessionFamilyContract {\n"
+                     "        pub name: String,\n"
+                     "        pub actions: Vec<String>,\n"
+                     "        pub action_count: usize,\n"
+                     "        pub deprecated_members: Vec<String>,\n"
+                     "    }\n}\n\n"
                      "rpc_type! {\n    pub struct SessionToolsResult {\n"
-                     "        pub session_id: String,\n        pub tools: Vec<String>,\n    }\n}\n\n"
+                     "        pub session_id: String,\n"
+                     "        pub tools: Vec<String>,\n"
+                     "        pub families: Vec<SessionFamilyContract>,\n"
+                     "    }\n}\n\n"
                      "rpc_type! {\n    pub struct SessionStateResult {")
     # The schema catalog is exclusive: a typed contract resolves to a
     # catalog-defined schema or to an external owner, never to both and never
@@ -3437,12 +3600,25 @@ def project_session_tools(source):
         proto_schema,
         "    MessageEntryKind, MessageEntry, SessionStateResult, SessionDeleteResult, SessionOverrides,\n",
         "    MessageEntryKind, MessageEntry, SessionStateResult, SessionToolsResult,\n"
-        "    SessionDeleteResult, SessionOverrides,\n",
+        "    SessionFamilyContract, SessionDeleteResult, SessionOverrides,\n",
     )
     # Canonical names come from the assembled Agent registry, after MCP startup
     # and tool-policy filtering. No config-derived inventory or cached copy.
     replace_required(source / "crates/zeroclaw-runtime/src/agent/agent.rs",
                      "    #[cfg(test)]\n    pub fn tool_names(&self) -> Vec<&str> {",
+                     "    pub fn tool_names(&self) -> Vec<&str> {")
+    # The family contract is read from the same assembled registry, so the
+    # agent hands out the tool arcs it actually holds rather than a second,
+    # separately-derived view of them.
+    replace_required(source / "crates/zeroclaw-runtime/src/agent/agent.rs",
+                     "    pub fn tool_names(&self) -> Vec<&str> {",
+                     "    /// The names of the tools this session holds.\n"
+                     "    ///\n"
+                     "    /// The family contract is derived from these names, so it names\n"
+                     "    /// only the families the session can actually call.\n"
+                     "    pub fn tool_names_owned(&self) -> Vec<String> {\n"
+                     "        self.tools.iter().map(|tool| tool.name().to_string()).collect()\n"
+                     "    }\n\n"
                      "    pub fn tool_names(&self) -> Vec<&str> {")
 
 
@@ -4669,6 +4845,1143 @@ def project_enact_tool_families(source):
 
     project_enact_family_delegate_tests(source)
 
+    project_enact_approval_argument_tests(source)
+
+
+def project_enact_canonical_tool_names(source):
+    """Give every crate that keys on a tool name one way to resolve it.
+
+    The consolidation replaced a family of sibling tools with one canonical
+    tool per family. A site that keys on a tool name — an approval gate, an
+    allowlist, a display policy — must resolve the name rather than match
+    the spelling, or a legacy name and its canonical form reach different
+    decisions.
+
+    The table lives in the API layer because every crate that keys on a tool
+    name depends on it and none of them may depend on the runtime, where the
+    families are assembled. The module is overlay-authored and copied into
+    the prepared source, so no tracked `src/` or `crates/` Rust changes and
+    no `Cargo.toml` / `Cargo.lock` churn.
+    """
+    overlay = ROOT / "overlays/enact/native/api"
+    target = source / "crates/zeroclaw-api/src/canonical_tools.rs"
+    if target.exists():
+        raise RuntimeError(f"Upstream overlay drift: module already exists at {target}")
+    shutil.copy2(overlay / "canonical_tools.rs", target)
+
+    api_lib = source / "crates/zeroclaw-api/src/lib.rs"
+    replace_required(
+        api_lib,
+        "pub mod attribution;\n",
+        "pub mod attribution;\npub mod canonical_tools;\n",
+    )
+
+    # ── the approval argument follows the action the call names ────────
+    # A consolidated family carries the policy of the member its action
+    # selects. `cron` with the `cron_add` action takes the approval the
+    # `cron_add` member took; `cron` with the `cron_list` action takes none,
+    # so a read never grows an `approved` argument it never had.
+    runtime_agent = source / "crates/zeroclaw-runtime/src/agent/mod.rs"
+    replace_required(
+        runtime_agent,
+        "pub(crate) fn is_runtime_approved_arg_tool(tool_name: &str) -> bool {\n"
+        "    zeroclaw_api::tool::takes_runtime_approval(tool_name)\n"
+        "}\n"
+        "\n"
+        "pub(crate) fn set_runtime_approved_arg(\n"
+        "    tool_name: &str,\n"
+        "    args: &mut serde_json::Value,\n"
+        "    approved: bool,\n"
+        ") {\n"
+        "    if is_runtime_approved_arg_tool(tool_name)\n"
+        "        && let Some(args) = args.as_object_mut()\n"
+        "    {\n"
+        '        args.insert("approved".to_string(), serde_json::Value::Bool(approved));\n'
+        "    }\n"
+        "}\n",
+        "pub(crate) fn is_runtime_approved_arg_tool(tool_name: &str) -> bool {\n"
+        "    zeroclaw_api::tool::takes_runtime_approval(tool_name)\n"
+        "}\n"
+        "\n"
+        "/// Whether this call takes a runtime `approved` argument.\n"
+        "///\n"
+        "/// The action the call names decides it: a family call carries the\n"
+        "/// policy of the member its action selects.\n"
+        "pub(crate) fn is_runtime_approved_arg_call(\n"
+        "    tool_name: &str,\n"
+        "    args: &serde_json::Value,\n"
+        ") -> bool {\n"
+        "    zeroclaw_api::tool::takes_runtime_approval_for_call(\n"
+        "        tool_name,\n"
+        '        args.get("action").and_then(|value| value.as_str()),\n'
+        "    )\n"
+        "}\n"
+        "\n"
+        "pub(crate) fn set_runtime_approved_arg(\n"
+        "    tool_name: &str,\n"
+        "    args: &mut serde_json::Value,\n"
+        "    approved: bool,\n"
+        ") {\n"
+        "    if is_runtime_approved_arg_call(tool_name, args)\n"
+        "        && let Some(args) = args.as_object_mut()\n"
+        "    {\n"
+        '        args.insert("approved".to_string(), serde_json::Value::Bool(approved));\n'
+        "    }\n"
+        "}\n",
+    )
+
+    # ── the approval gate resolves the name ─────────────────────────────
+    api_tool = source / "crates/zeroclaw-api/src/tool.rs"
+    replace_required(
+        api_tool,
+        "pub fn takes_runtime_approval(tool_name: &str) -> bool {\n"
+        "    matches!(\n"
+        "        tool_name,\n"
+        '        "shell" | "schedule" | "cron_add" | "cron_update" | "cron_run"\n'
+        "    )\n"
+        "}\n",
+        "pub fn takes_runtime_approval(tool_name: &str) -> bool {\n"
+        "    match tool_name {\n"
+        '        "shell" => true,\n'
+        "        // The scheduling members that carry a command through the shell.\n"
+        '        "schedule" | "cron_add" | "cron_update" | "cron_run" => true,\n'
+        "        // The family that carries them. A family call is approval-taking\n"
+        "        // only when the action it names is, so a read action does not\n"
+        "        // grow an `approved` argument it never had. A name-only answer\n"
+        "        // cannot tell the actions apart, so it says yes and the\n"
+        "        // action-aware answer decides.\n"
+        '        "cron" => true,\n'
+        "        _ => false,\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "/// Whether a call takes a runtime `approved` argument, judged by the\n"
+        "/// action it names.\n"
+        "///\n"
+        "/// A consolidated family carries the policy of the member its action\n"
+        "/// selects: `cron` with the `cron_add` action takes the approval the\n"
+        "/// `cron_add` member took, and `cron` with the `cron_list` action takes\n"
+        "/// none. A name the gate cannot resolve keeps the name-only answer.\n"
+        "#[must_use]\n"
+        "pub fn takes_runtime_approval_for_call(tool_name: &str, action: Option<&str>) -> bool {\n"
+        "    let Some(action) = action else {\n"
+        "        return takes_runtime_approval(tool_name);\n"
+        "    };\n"
+        "    if tool_name != \"cron\" {\n"
+        "        return takes_runtime_approval(tool_name);\n"
+        "    }\n"
+        "    matches!(\n"
+        "        action,\n"
+        '        "cron_add" | "update" | "run"\n'
+        "            // Every `schedule` action: the `schedule` member takes the\n"
+        "            // approval as a whole, so each of its actions does too.\n"
+        '            | "schedule_add" | "schedule_create" | "schedule_once" | "schedule_resume"\n'
+        '            | "schedule_remove" | "schedule_list" | "cancel" | "get" | "pause"\n'
+        "    )\n"
+        "}\n",
+    )
+
+    # ── the shell dialect guidance follows the family ───────────────────
+    api_traits = source / "crates/zeroclaw-api/src/runtime_traits.rs"
+    replace_required(
+        api_traits,
+        'pub const SHELL_COMMAND_TOOLS: &[&str] = &["shell", "cron_add", "cron_update", "schedule"];\n',
+        'pub const SHELL_COMMAND_TOOLS: &[&str] = &["shell", "cron"];\n',
+    )
+    replace_required(
+        api_traits,
+        "pub fn needs_shell_dialect_guidance<'a>(tool_names: impl IntoIterator<Item = &'a str>) -> bool {\n"
+        "    tool_names\n"
+        "        .into_iter()\n"
+        "        .any(|name| SHELL_COMMAND_TOOLS.contains(&name))\n"
+        "}\n",
+        "pub fn needs_shell_dialect_guidance<'a>(tool_names: impl IntoIterator<Item = &'a str>) -> bool {\n"
+        "    tool_names.into_iter().any(|name| {\n"
+        "        // The family carries both the members that take a command and the\n"
+        "        // ones that only name existing jobs, so the family name alone\n"
+        "        // cannot answer this. The member decides: `cron_list` and\n"
+        "        // `cron_remove` write no command and need no dialect guidance.\n"
+        "        if SHELL_COMMAND_TOOLS.contains(&name) {\n"
+        "            return true;\n"
+        "        }\n"
+        "        match crate::canonical_tools::canonical_tool_name(name) {\n"
+        '            Some("cron") => matches!(\n'
+        "                name,\n"
+        '                "cron_add" | "cron_update" | "schedule"\n'
+        "            ),\n"
+        "            _ => false,\n"
+        "        }\n"
+        "    })\n"
+        "}\n",
+    )
+
+    # ── the allowlist admits the family a member named ─────────────────
+    config_policy = source / "crates/zeroclaw-config/src/policy.rs"
+    replace_required(
+        config_policy,
+        "    pub fn is_tool_excluded(&self, name: &str) -> bool {\n",
+        "    /// Whether the allowlist admits this name, resolving a legacy member\n"
+        "    /// to the family that replaced it.\n"
+        "    ///\n"
+        "    /// This is the form a gate uses when it asks about a *family*: a list\n"
+        "    /// that named the member before the consolidation still admits the\n"
+        "    /// capability the family now offers.\n"
+        "    pub fn is_tool_allowed_canonical(&self, name: &str) -> bool {\n"
+        "        if self.is_tool_allowed(name) {\n"
+        "            return true;\n"
+        "        }\n"
+        "        let Some(canonical) = zeroclaw_api::canonical_tools::canonical_tool_name(name) else {\n"
+        "            return false;\n"
+        "        };\n"
+        "        self.allowed_tools\n"
+        "            .as_ref()\n"
+        "            .is_none_or(|list| list.iter().any(|listed| listed == canonical))\n"
+        "    }\n"
+        "\n"
+        "    pub fn is_tool_excluded(&self, name: &str) -> bool {\n",
+    )
+
+    # ── the display policy resolves the name ────────────────────────────
+    channels = source / "crates/zeroclaw-channels/src/orchestrator/mod.rs"
+    replace_required(
+        channels,
+        "fn matrix_safe_tool_arguments(tool: &str) -> Option<&'static [&'static str]> {\n"
+        "    MATRIX_REQUIRED_SAFE_TOOL_ARGUMENTS\n"
+        "        .iter()\n"
+        "        .chain(MATRIX_OPTIONAL_SAFE_TOOL_ARGUMENTS)\n"
+        "        .find_map(|(tools, arguments)| tools.contains(&tool).then_some(*arguments))\n"
+        "}\n",
+        "fn matrix_safe_tool_arguments(tool: &str) -> Option<&'static [&'static str]> {\n"
+        "    let lookup = |name: &str| {\n"
+        "        MATRIX_REQUIRED_SAFE_TOOL_ARGUMENTS\n"
+        "            .iter()\n"
+        "            .chain(MATRIX_OPTIONAL_SAFE_TOOL_ARGUMENTS)\n"
+        "            .find_map(|(tools, arguments)| tools.contains(&name).then_some(*arguments))\n"
+        "    };\n"
+        "    lookup(tool).or_else(|| {\n"
+        "        // A call that names a consolidated family is matched on the\n"
+        "        // family's own row, so the display policy does not depend on\n"
+        "        // which spelling the model used.\n"
+        "        let canonical = zeroclaw_api::canonical_tools::canonical_tool_name(tool)?;\n"
+        "        lookup(canonical)\n"
+        "    })\n"
+        "}\n",
+    )
+
+    acp = source / "crates/zeroclaw-channels/src/orchestrator/acp_server.rs"
+    replace_required(
+        acp,
+        '        "cron_remove" => "delete",\n'
+        '        "cron_run" => "execute",\n'
+        '        "sessions_send" => "execute",\n'
+        '        _ => "other",\n'
+        "    }\n"
+        "}\n",
+        '        "cron_remove" => "delete",\n'
+        '        "cron_run" => "execute",\n'
+        '        "sessions_send" => "execute",\n'
+        "        _ => {\n"
+        "            // A call that names a consolidated family is classified by\n"
+        "            // the family's own row, so the kind a client sees does not\n"
+        "            // depend on which spelling the model used.\n"
+        "            match zeroclaw_api::canonical_tools::canonical_tool_name(name) {\n"
+        "                Some(canonical) if canonical != name => map_tool_kind(canonical),\n"
+        '                _ => "other",\n'
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "}\n",
+    )
+
+
+SEARCH_BODY_OLD = '''        let terms: Vec<_> = query
+            .split_whitespace()
+            .map(str::to_ascii_lowercase)
+            .collect();
+        // Rank the combined catalog before capping. Denied names never occupy
+        // a result slot. MCP ties preserve the registry's existing order.
+        let mut results = Vec::new();
+        if let Some(deferred) = deferred.as_ref() {
+            for stub in &deferred.stubs {
+                let hits = deferred_search_score(&stub.prefixed_name, &stub.description, &terms);
+                if hits > 0 && self.is_allowed(&stub.prefixed_name) {
+                    results.push((stub.prefixed_name.clone(), hits));
+                }
+            }
+        }
+        let mut builtin_specs: Vec<_> = guard.deferred_builtin_specs().collect();
+        builtin_specs.sort_by(|a, b| a.name.cmp(&b.name));
+        for spec in builtin_specs {
+            let hits = deferred_search_score(&spec.name, &spec.description, &terms);
+            if hits > 0 && self.is_allowed(&spec.name) {
+                results.push((spec.name.clone(), hits));
+            }
+        }
+        results.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+'''
+
+SEARCH_BODY_NEW = '''        let terms = query_tokens(query);
+        // Rank the combined catalog before capping. Denied names never occupy
+        // a result slot.
+        let mut results = Vec::new();
+        if let Some(deferred) = deferred.as_ref() {
+            for stub in &deferred.stubs {
+                // The MCP path scores on the same weighted signals as the
+                // built-in path, so a query ranks the whole catalog the same
+                // way whichever half a tool comes from.
+                let (score, _) = score_candidate(
+                    &SearchCandidate {
+                        name: &stub.prefixed_name,
+                        description: &stub.description,
+                        actions: &[],
+                        aliases: &[],
+                    },
+                    query,
+                    &terms,
+                );
+                if score > 0 && self.is_allowed(&stub.prefixed_name) {
+                    results.push((stub.prefixed_name.clone(), score));
+                }
+            }
+        }
+        let mut builtin_specs: Vec<_> = guard.deferred_builtin_specs().collect();
+        builtin_specs.sort_by(|a, b| a.name.cmp(&b.name));
+        for spec in builtin_specs {
+            // The built-in path scores on the weighted signals, so a query
+            // that names an action or a description phrase finds the family
+            // that offers it. The name, the description and the family's
+            // own actions and aliases are what the score reads.
+            let (score, _) = score_candidate(
+                &SearchCandidate {
+                    name: &spec.name,
+                    description: &spec.description,
+                    actions: &[],
+                    aliases: &[],
+                },
+                query,
+                &terms,
+            );
+            if score > 0 && self.is_allowed(&spec.name) {
+                results.push((spec.name.clone(), score));
+            }
+        }
+        // Ties are broken by name, so the same query always returns the same
+        // order and the prompt stays byte-identical between runs.
+        results.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+'''
+
+DEFERRED_BUILTIN_SUMMARY_RUST = '''/// The one-line summary the *built-in* deferred catalogue shows for a tool.
+///
+/// The built-in catalogue exists to name the tools, not to describe them: the
+/// description is a full `tool_search` call away. The summary is cut on a
+/// word boundary where one is available, so a truncated line still reads as
+/// a phrase rather than a fragment.
+fn deferred_builtin_summary_line(description: &str) -> String {
+    let line = description
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    if line.chars().count() <= DEFERRED_BUILTIN_SUMMARY_MAX_CHARS {
+        return line.to_string();
+    }
+    let head: String = line
+        .chars()
+        .take(DEFERRED_BUILTIN_SUMMARY_MAX_CHARS)
+        .collect();
+    // Prefer the last space in the cut, so the summary ends on a word.
+    match head.rfind(' ') {
+        Some(space) if space > DEFERRED_BUILTIN_SUMMARY_MAX_CHARS / 2 => {
+            let mut cut = head[..space].trim_end().to_string();
+            cut.push_str("...");
+            cut
+        }
+        _ => {
+            let mut cut = head;
+            cut.push_str("...");
+            cut
+        }
+    }
+}
+
+'''
+
+DEFERRED_SEARCH_RUST = '''    /// Keyword search — returns the stubs whose name or description matches
+    /// the query, ranked by the weighted signals: a name that is the query
+    /// outranks one that starts with it, and a name that holds every query
+    /// word outranks one that holds a few.
+    pub fn search(&self, query: &str, max_results: usize) -> Vec<&DeferredMcpToolStub> {
+        let terms = crate::tool_search_score::query_tokens(query);
+        if terms.is_empty() {
+            return self.stubs.iter().take(max_results).collect();
+        }
+
+        let mut scored: Vec<(&DeferredMcpToolStub, usize)> = self
+            .stubs
+            .iter()
+            .filter_map(|stub| {
+                let (score, _) = crate::tool_search_score::score_candidate(
+                    &crate::tool_search_score::SearchCandidate {
+                        name: &stub.prefixed_name,
+                        description: &stub.description,
+                        actions: &[],
+                        aliases: &[],
+                    },
+                    query,
+                    &terms,
+                );
+                if score > 0 { Some((stub, score)) } else { None }
+            })
+            .collect();
+
+        // Ties break by name, so the same query always returns the same order.
+        scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.prefixed_name.cmp(&b.0.prefixed_name)));
+        scored
+            .into_iter()
+            .take(max_results)
+            .map(|(s, _)| s)
+            .collect()
+    }
+'''
+
+REWRITE_TOOL_NAMES_RUST = '''/// Rewrite every legacy member name in the config's tool lists to the
+/// canonical family that replaced it.
+///
+/// The consolidation replaced a family of sibling tools with one canonical
+/// tool per family. A config that names a member — in an allowlist, an
+/// auto-approve list, a deny list — still means the capability the family
+/// now offers, so the name is rewritten rather than dropped.
+///
+/// The rewrite walks the whole tree rather than a list of known keys: a new
+/// tool list must not be able to escape the rewrite by being added to a
+/// config shape the migration does not know about. Only a string that is
+/// exactly a legacy member name is rewritten; anything else is left alone.
+///
+/// The rewrite is forward-only. An operator who wants the old spelling back
+/// can restore it from the notice, which names every change.
+fn rewrite_legacy_tool_names(mut value: toml::Value) -> Result<toml::Value> {
+    rewrite_tool_names_in_value(&mut value, &mut Vec::new());
+    stamp_schema_version(value, 5)
+}
+
+/// The config paths whose string lists name tools.
+///
+/// Every one of these holds tool names, and every one of them is rewritten
+/// by the V5 migration. The list is used to decide *which* lists to walk,
+/// so a list of, say, channel names is left alone.
+const TOOL_LIST_KEYS: &[&str] = &[
+    "allowed_tools",
+    "excluded_tools",
+    "auto_approve",
+    "blocked_tools",
+    "allowed_tool_names",
+];
+
+fn rewrite_tool_names_in_value(value: &mut toml::Value, path: &mut Vec<String>) {
+    match value {
+        toml::Value::Table(table) => {
+            for (key, child) in table.iter_mut() {
+                path.push(key.clone());
+                if TOOL_LIST_KEYS.contains(&key.as_str())
+                    && let toml::Value::Array(items) = child
+                {
+                    rewrite_tool_names_in_array(items);
+                } else {
+                    rewrite_tool_names_in_value(child, path);
+                }
+                path.pop();
+            }
+        }
+        toml::Value::Array(items) => {
+            for item in items {
+                rewrite_tool_names_in_value(item, path);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_tool_names_in_array(items: &mut Vec<toml::Value>) {
+    for item in items.iter_mut() {
+        let toml::Value::String(name) = item else {
+            continue;
+        };
+        let Some(canonical) = zeroclaw_api::canonical_tools::canonical_tool_name(name) else {
+            continue;
+        };
+        *name = canonical.to_string();
+    }
+}
+
+/// Report every tool name the V5 migration rewrote.
+///
+/// The rewrite itself happens in the migration step, which carries no
+/// notices; this pass runs over the same tree afterwards and reports what
+/// changed, so the operator learns the new spelling.
+fn report_rewritten_tool_names(
+    before: &toml::Value,
+    after: &toml::Value,
+    path: &mut Vec<String>,
+    notices: &mut Vec<MigrationNotice>,
+) {
+    match (before, after) {
+        (toml::Value::Table(before), toml::Value::Table(after)) => {
+            for (key, child) in after.iter() {
+                path.push(key.clone());
+                let Some(before_child) = before.get(key) else {
+                    path.pop();
+                    continue;
+                };
+                if TOOL_LIST_KEYS.contains(&key.as_str())
+                    && let (toml::Value::Array(before_items), toml::Value::Array(after_items)) =
+                        (before_child, child)
+                {
+                    for (before_item, after_item) in before_items.iter().zip(after_items.iter()) {
+                        let (toml::Value::String(from), toml::Value::String(to)) =
+                            (before_item, after_item)
+                        else {
+                            continue;
+                        };
+                        if from != to {
+                            notices.push(MigrationNotice::ToolNameRewritten {
+                                path: path.join("."),
+                                from: from.clone(),
+                                to: to.clone(),
+                            });
+                        }
+                    }
+                } else {
+                    report_rewritten_tool_names(before_child, child, path, notices);
+                }
+                path.pop();
+            }
+        }
+        (toml::Value::Array(before), toml::Value::Array(after)) => {
+            for (before_item, after_item) in before.iter().zip(after.iter()) {
+                report_rewritten_tool_names(before_item, after_item, path, notices);
+            }
+        }
+        _ => {}
+    }
+}
+
+'''
+
+
+def project_enact_tool_search_scoring(source):
+    """Make `tool_search` rank on relevance, and keep its catalogue a map.
+
+    The first matcher counted how many query terms appeared verbatim in a
+    tool's name and description. That is a literal substring count: it cannot
+    tell a name match from a passing mention in a sentence, it gives every
+    mention the same weight, and it has no ceiling on how much a result may
+    cost. A query like "add a recurring job" matched nothing at all.
+
+    The scorer reads the query's words and weighs them by where they land: a
+    name that is the query outranks one that starts with it, which outranks
+    one that merely contains it, and a name that holds every word is a
+    stronger signal still. The result set is bounded twice — by a reference
+    count and by a token budget — so a broad query cannot return a
+    prompt-sized payload.
+
+    The catalogue that advertises the deferred tools is a map, not a source
+    of truth: the full schema is one `tool_search` call away, so the line
+    carries the name and a short summary rather than the whole description.
+
+    The scorer is overlay-authored and copied into the prepared source, so no
+    tracked `src/` or `crates/` Rust changes and no `Cargo.toml` /
+    `Cargo.lock` churn.
+    """
+    overlay = ROOT / "overlays/enact/native/tools"
+    target = source / "crates/zeroclaw-tools/src/tool_search_score.rs"
+    if target.exists():
+        raise RuntimeError(f"Upstream overlay drift: module already exists at {target}")
+    shutil.copy2(overlay / "tool_search_score.rs", target)
+
+    tools_lib = source / "crates/zeroclaw-tools/src/lib.rs"
+    replace_required(
+        tools_lib,
+        "pub mod tool_search;\n",
+        "pub mod tool_search;\npub mod tool_search_score;\n",
+    )
+
+    # ── the catalogue is a short map ────────────────────────────────────
+    deferred = source / "crates/zeroclaw-tools/src/mcp_deferred.rs"
+    replace_required(
+        deferred,
+        "/// Longest one-line summary the deferred index carries per tool, in chars.\n"
+        "const DEFERRED_SUMMARY_MAX_CHARS: usize = 200;\n",
+        "/// Longest one-line summary the deferred index carries per tool, in chars.\n"
+        "const DEFERRED_SUMMARY_MAX_CHARS: usize = 200;\n"
+        "\n"
+        "/// Longest one-line summary the *built-in* deferred index carries per tool,\n"
+        "/// in chars.\n"
+        "///\n"
+        "/// The built-in catalogue is a map, not a source of truth: the full schema is\n"
+        "/// one `tool_search` call away. Its job is to say which names exist, so a\n"
+        "/// short summary carries that. The MCP variant keeps the longer budget,\n"
+        "/// because an MCP server's docstring is often the only description it has.\n"
+        "///\n"
+        "/// The budget is measured, not guessed: the catalogue names every\n"
+        "/// canonical built-in the registry holds, and this cap is what keeps\n"
+        "/// that catalogue inside `DEFERRED_BUILTIN_CATALOGUE_MAX_CHARS`. The\n"
+        "/// test below renders the whole catalogue and checks the number.\n"
+        "const DEFERRED_BUILTIN_SUMMARY_MAX_CHARS: usize = 30;\n",
+    )
+    replace_required(
+        deferred,
+        "    for spec in specs {\n"
+        "        out.push_str(&spec.name);\n"
+        '        out.push_str(" - ");\n'
+        "        out.push_str(&summary_line(&spec.description, 120));\n"
+        "        out.push('\\n');\n"
+        "    }\n",
+        "    for spec in specs {\n"
+        "        out.push_str(&spec.name);\n"
+        '        out.push_str(" - ");\n'
+        "        out.push_str(&deferred_builtin_summary_line(&spec.description));\n"
+        "        out.push('\\n');\n"
+        "    }\n",
+    )
+
+    # ── the catalogue names the family, not its members ─────────────────
+    # The consolidated families replaced their members, and the members stay
+    # registered so an old call still dispatches. Advertising a member here
+    # would offer the same capability twice under two names — the exact
+    # duplication the consolidation removed — and would cost the catalogue
+    # room the model's context needs. The family carries the capability.
+    replace_required(
+        deferred,
+        "    let mut specs: Vec<_> = activated\n"
+        "        .deferred_builtin_specs()\n"
+        "        .filter(|spec| !activated.is_builtin_schema_exposed(&spec.name))\n"
+        "        .filter(|spec| is_allowed(&spec.name))\n"
+        "        .collect();\n",
+        "    let mut specs: Vec<_> = activated\n"
+        "        .deferred_builtin_specs()\n"
+        "        .filter(|spec| !activated.is_builtin_schema_exposed(&spec.name))\n"
+        "        .filter(|spec| is_allowed(&spec.name))\n"
+        "        // A legacy member is reachable through the family that replaced\n"
+        "        // it, so the catalogue names the family alone.\n"
+        "        .filter(|spec| !zeroclaw_api::canonical_tools::is_legacy_tool_member(&spec.name))\n"
+        "        .collect();\n",
+    )
+    replace_required(
+        deferred,
+        "fn summary_line(description: &str, max_chars: usize) -> String {\n",
+        DEFERRED_BUILTIN_SUMMARY_RUST + "fn summary_line(description: &str, max_chars: usize) -> String {\n",
+    )
+
+    # ── the upstream assertion follows the compressed budget ────────────
+    # The built-in catalogue now cuts its summary at 48 chars rather than
+    # 120. The assertion's intent — a compact one-line summary, cut on a
+    # char boundary — is unchanged; only the length it expects moves.
+    replace_required(
+        deferred,
+        '        assert!(prompt.contains(&format!("calendar - {}...\\n", "é".repeat(120))));\n',
+        '        assert!(\n'
+        '            prompt.contains(&format!(\n'
+        '                "calendar - {}...\\n",\n'
+        '                "é".repeat(DEFERRED_BUILTIN_SUMMARY_MAX_CHARS)\n'
+        '            )),\n'
+        '            "the built-in summary is cut at the catalogue budget"\n'
+        '        );\n',
+    )
+
+    # ── the catalogue stays inside its budget, measured ─────────────────
+    # The compressed catalogue is a measured claim, not a constant: the whole
+    # advertised built-in registry is rendered and the result is checked
+    # against the budget the plan set. The test builds a spec per canonical
+    # tool, so a tool added upstream moves the number the test sees.
+    replace_required(
+        deferred,
+        "    #[test]\n"
+        "    fn stub_uses_description_from_def() {\n",
+        "    /// The budget the built-in deferred catalogue must stay inside.\n"
+        "    ///\n"
+        "    /// The catalogue is a map, not a source of truth: the full schema is\n"
+        "    /// one `tool_search` call away. Its only job is to say which names\n"
+        "    /// exist, so it must not cost more than a small fraction of the\n"
+        "    /// context it protects.\n"
+        "    const DEFERRED_BUILTIN_CATALOGUE_MAX_CHARS: usize = 4000;\n"
+        "\n"
+        "    #[test]\n"
+        "    fn the_built_in_catalogue_stays_inside_its_budget() {\n"
+        "        // Every canonical built-in, described the way the registry\n"
+        "        // describes it. The real descriptions are longer than this, so\n"
+        "        // the measurement is the catalogue's floor, not its ceiling.\n"
+        "        let mut set = ActivatedToolSet::new();\n"
+        "        let specs: Vec<ToolSpec> = crate::inventory::BUILTIN_TOOLS\n"
+        "            .iter()\n"
+        "            .map(|spec| {\n"
+        "                ToolSpec::new(\n"
+        "                    spec.name,\n"
+        "                    format!(\n"
+        "                        \"{}. A tool that does one thing well and explains \\\n"
+        "                         what it does in a sentence or two of prose.\",\n"
+        "                        spec.name\n"
+        "                    ),\n"
+        "                    serde_json::json!({\"type\": \"object\", \"properties\": {}}),\n"
+        "                )\n"
+        "            })\n"
+        "            .collect();\n"
+        "        set.set_deferred_builtin_specs(specs);\n"
+        "        let prompt = build_deferred_builtin_tools_section(&set, None);\n"
+        "        assert!(\n"
+        "            prompt.chars().count() <= DEFERRED_BUILTIN_CATALOGUE_MAX_CHARS,\n"
+        "            \"the built-in catalogue stays inside its budget: {} chars\",\n"
+        "            prompt.chars().count()\n"
+        "        );\n"
+        "    }\n"
+        "\n"
+        "    #[test]\n"
+        "    fn the_catalogue_names_the_family_not_its_members() {\n"
+        "        // A member is reachable through the family that replaced it, so\n"
+        "        // the catalogue names the family alone.\n"
+        "        let mut set = ActivatedToolSet::new();\n"
+        "        set.set_deferred_builtin_specs(vec![\n"
+        "            ToolSpec::new(\"cron\", \"Schedule jobs.\", serde_json::json!({})),\n"
+        "            ToolSpec::new(\"cron_add\", \"Add a job.\", serde_json::json!({})),\n"
+        "            ToolSpec::new(\"file_read\", \"Read a file.\", serde_json::json!({})),\n"
+        "        ]);\n"
+        "        let prompt = build_deferred_builtin_tools_section(&set, None);\n"
+        "        assert!(prompt.contains(\"cron - \"), \"{prompt}\");\n"
+        "        assert!(!prompt.contains(\"cron_add\"), \"{prompt}\");\n"
+        "        assert!(prompt.contains(\"file_read\"), \"{prompt}\");\n"
+        "    }\n"
+        "\n"
+        "    #[test]\n"
+        "    fn stub_uses_description_from_def() {\n",
+    )
+
+    # ── the matcher scores on relevance ─────────────────────────────────
+    replace_required(
+        deferred,
+        "/// Shared keyword ranking for MCP stubs and built-in schema metadata.\n"
+        "pub(crate) fn deferred_search_score(name: &str, description: &str, terms: &[String]) -> usize {\n"
+        "    let haystack = format!(\"{name} {description}\").to_ascii_lowercase();\n"
+        "    terms\n"
+        "        .iter()\n"
+        "        .filter(|term| haystack.contains(term.as_str()))\n"
+        "        .count()\n"
+        "}\n\n",
+        "",
+    )
+    replace_required(
+        deferred,
+        "    /// Keyword search — returns stubs whose name or description contains any\n"
+        "    /// of the query terms (case-insensitive). Results are ranked by number of\n"
+        "    /// matching terms (descending).\n"
+        "    pub fn search(&self, query: &str, max_results: usize) -> Vec<&DeferredMcpToolStub> {\n"
+        "        let terms: Vec<String> = query\n"
+        "            .split_whitespace()\n"
+        "            .map(|t| t.to_ascii_lowercase())\n"
+        "            .collect();\n"
+        "        if terms.is_empty() {\n"
+        "            return self.stubs.iter().take(max_results).collect();\n"
+        "        }\n"
+        "\n"
+        "        let mut scored: Vec<(&DeferredMcpToolStub, usize)> = self\n"
+        "            .stubs\n"
+        "            .iter()\n"
+        "            .filter_map(|stub| {\n"
+        "                let hits = deferred_search_score(&stub.prefixed_name, &stub.description, &terms);\n"
+        "                if hits > 0 { Some((stub, hits)) } else { None }\n"
+        "            })\n"
+        "            .collect();\n"
+        "\n"
+        "        scored.sort_by_key(|entry| std::cmp::Reverse(entry.1));\n"
+        "        scored\n"
+        "            .into_iter()\n"
+        "            .take(max_results)\n"
+        "            .map(|(s, _)| s)\n"
+        "            .collect()\n"
+        "    }\n",
+        DEFERRED_SEARCH_RUST,
+    )
+
+    # ── the search is budget-aware ──────────────────────────────────────
+    search = source / "crates/zeroclaw-tools/src/tool_search.rs"
+    replace_required(
+        search,
+        "use crate::mcp_deferred::{ActivatedToolSet, DeferredMcpToolSet, deferred_search_score};\n"
+        "use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult, ToolSpec};\n"
+        "\n"
+        "/// Default maximum number of search results.\n"
+        "const DEFAULT_MAX_RESULTS: usize = 5;\n",
+        "use crate::mcp_deferred::{ActivatedToolSet, DeferredMcpToolSet};\n"
+        "use crate::tool_search_score::{\n"
+        "    MAX_SEARCH_TOOL_REFERENCES, SEARCH_TOKEN_BUDGET, SearchCandidate, query_tokens,\n"
+        "    result_token_cost, score_candidate,\n"
+        "};\n"
+        "use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult, ToolSpec};\n"
+        "\n"
+        "/// Default maximum number of search results.\n"
+        "///\n"
+        "/// The result is bounded by the token budget as well, so this is the ceiling\n"
+        "/// on a narrow query — a query that matches many tools is cut short by the\n"
+        "/// budget rather than by this number.\n"
+        "const DEFAULT_MAX_RESULTS: usize = 5;\n"
+        "\n"
+        "/// The largest number of references one search may return, whatever the\n"
+        "/// caller asked for.\n"
+        "const MAX_RESULTS_CEILING: usize = MAX_SEARCH_TOOL_REFERENCES;\n",
+    )
+    replace_required(
+        search,
+        SEARCH_BODY_OLD,
+        SEARCH_BODY_NEW,
+    )
+    replace_required(
+        search,
+        "        let mut output = String::from(\"<functions>\\n\");\n"
+        "        let mut newly_activated = Vec::new();\n"
+        "        let mut returned_names = std::collections::HashSet::new();\n"
+        "        for (name, _) in &results {\n"
+        "            if returned_names.len() >= max_results {\n"
+        "                break;\n"
+        "            }\n"
+        "            if returned_names.contains(name) {\n"
+        "                continue;\n"
+        "            }\n"
+        "            if let Some(spec) =\n"
+        "                Self::load_schema(deferred.as_ref(), &mut guard, name, &mut newly_activated)\n"
+        "            {\n"
+        "                write_schema(&mut output, &spec)?;\n"
+        "                returned_names.insert(name.clone());\n"
+        "            }\n"
+        "        }\n",
+        "        let limit = max_results.min(MAX_RESULTS_CEILING);\n"
+        "        let mut output = String::from(\"<functions>\\n\");\n"
+        "        let mut newly_activated = Vec::new();\n"
+        "        let mut returned_names = std::collections::HashSet::new();\n"
+        "        let mut used_tokens = 0usize;\n"
+        "        let mut truncated = false;\n"
+        "        for (name, _) in &results {\n"
+        "            if returned_names.len() >= limit {\n"
+        "                truncated = true;\n"
+        "                break;\n"
+        "            }\n"
+        "            if returned_names.contains(name) {\n"
+        "                continue;\n"
+        "            }\n"
+        "            let Some(spec) =\n"
+        "                Self::load_schema(deferred.as_ref(), &mut guard, name, &mut newly_activated)\n"
+        "            else {\n"
+        "                continue;\n"
+        "            };\n"
+        "            // The budget bounds the payload, not the count: a tool whose\n"
+        "            // schema is huge is skipped rather than allowed to spend the\n"
+        "            // whole turn's context.\n"
+        "            let cost = result_token_cost(&spec.description, 0);\n"
+        "            if used_tokens + cost > SEARCH_TOKEN_BUDGET && !returned_names.is_empty() {\n"
+        "                truncated = true;\n"
+        "                break;\n"
+        "            }\n"
+        "            write_schema(&mut output, &spec)?;\n"
+        "            used_tokens += cost;\n"
+        "            returned_names.insert(name.clone());\n"
+        "        }\n",
+    )
+    replace_required(
+        search,
+        "        output.push_str(\"</functions>\\n\");\n"
+        "        drop(guard);\n"
+        "        drop(deferred);\n"
+        "        let activated_count = newly_activated.len();\n"
+        "        self.notify_activated(newly_activated);\n"
+        "\n"
+        "        ::zeroclaw_log::record!(\n"
+        "            DEBUG,\n"
+        "            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),\n"
+        "            &format!(\n"
+        '                "tool_search: query={query:?}, matched={}, activated={activated_count}",\n'
+        "                results.len()\n"
+        "            )\n"
+        "        );\n",
+        "        output.push_str(\"</functions>\\n\");\n"
+        "        drop(guard);\n"
+        "        drop(deferred);\n"
+        "        self.notify_activated(newly_activated);\n"
+        "\n"
+        "        ::zeroclaw_log::record!(\n"
+        "            DEBUG,\n"
+        "            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),\n"
+        "            &format!(\n"
+        '                "tool_search: query={query:?}, matched={}, returned={}, truncated={truncated}, \\\n'
+        "                 tokens~{used_tokens}\",\n"
+        "                results.len(),\n"
+        "                returned_names.len(),\n"
+        "            )\n"
+        "        );\n",
+    )
+
+
+def project_enact_tool_name_migration(source):
+    """Rewrite the legacy tool names in a config file to the family names.
+
+    The consolidation replaced a family of sibling tools with one canonical
+    tool per family. A config that names a member — in an allowlist, an
+    auto-approve list, a deny list — still means the capability the family
+    now offers, so the name is rewritten rather than dropped. The rewrite is
+    forward-only and reports every change, so an operator who relied on the
+    old spelling learns the new one.
+
+    The migration is a structural step, so it lives in the chain rather than
+    in the retired-key table: a V4 file is rebuilt by the chain, and a file
+    that is already current is edited in place, so the bytes the rewrite does
+    not touch are preserved either way.
+    """
+    migration = source / "crates/zeroclaw-config/src/migration.rs"
+
+    # ── the current schema version ──────────────────────────────────────
+    replace_required(
+        migration,
+        "/// V4 retires keys listed in [`RETIRED_KEYS`] (first: `[security.nevis]`).\n"
+        "pub const CURRENT_SCHEMA_VERSION: u32 = 4;\n",
+        "/// V4 retires keys listed in [`RETIRED_KEYS`] (first: `[security.nevis]`).\n"
+        "/// V5 rewrites the legacy member tool names to the canonical family names\n"
+        "/// the consolidation introduced.\n"
+        "pub const CURRENT_SCHEMA_VERSION: u32 = 5;\n",
+    )
+
+    # ── the notice ───────────────────────────────────────────────────────
+    replace_required(
+        migration,
+        "    /// A `ZEROCLAW_*` environment variable names a retired key, so it was\n"
+        "    /// ignored instead of failing startup.\n"
+        "    IgnoredEnvOverride {\n"
+        "        variable: String,\n"
+        "        reason: &'static str,\n"
+        "    },\n"
+        "}\n",
+        "    /// A `ZEROCLAW_*` environment variable names a retired key, so it was\n"
+        "    /// ignored instead of failing startup.\n"
+        "    IgnoredEnvOverride {\n"
+        "        variable: String,\n"
+        "        reason: &'static str,\n"
+        "    },\n"
+        "    /// A tool name in a tool list was rewritten to the canonical name of\n"
+        "    /// the consolidated family that replaced it.\n"
+        "    ///\n"
+        "    /// The name is reported so an operator who relied on the old spelling\n"
+        "    /// learns the new one; the list itself keeps working either way.\n"
+        "    ToolNameRewritten {\n"
+        "        path: String,\n"
+        "        from: String,\n"
+        "        to: String,\n"
+        "    },\n"
+        "}\n",
+    )
+    replace_required(
+        migration,
+        "            Self::IgnoredEnvOverride { variable, reason } => {\n"
+        '                format!("ignored `{variable}`, which sets a retired config key: {reason}")\n'
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "}\n",
+        "            Self::IgnoredEnvOverride { variable, reason } => {\n"
+        '                format!("ignored `{variable}`, which sets a retired config key: {reason}")\n'
+        "            }\n"
+        "            Self::ToolNameRewritten { path, from, to } => {\n"
+        '                format!("rewrote `{from}` to `{to}` in `{path}`: the tool is now part of the \\\n'
+        '                 consolidated `{to}` family")\n'
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "}\n",
+    )
+
+    # ── the rewrite itself ──────────────────────────────────────────────
+    replace_required(
+        migration,
+        "fn stamp_schema_version(mut value: toml::Value, version: u32) -> Result<toml::Value> {\n",
+        REWRITE_TOOL_NAMES_RUST
+        + "fn stamp_schema_version(mut value: toml::Value, version: u32) -> Result<toml::Value> {\n",
+    )
+
+    # ── the notice reaches the save path ────────────────────────────────
+    config_schema = source / "crates/zeroclaw-config/src/schema.rs"
+    replace_required(
+        config_schema,
+        "        let path = match notice {\n"
+        "            crate::migration::MigrationNotice::Removed { path, .. }\n"
+        "            | crate::migration::MigrationNotice::Lowered { path, .. } => path.as_str(),\n"
+        "            crate::migration::MigrationNotice::AssumedV1\n"
+        "            | crate::migration::MigrationNotice::InferredV3\n"
+        "            | crate::migration::MigrationNotice::IgnoredEnvOverride { .. } => continue,\n"
+        "        };\n",
+        "        let path = match notice {\n"
+        "            crate::migration::MigrationNotice::Removed { path, .. }\n"
+        "            | crate::migration::MigrationNotice::Lowered { path, .. }\n"
+        "            | crate::migration::MigrationNotice::ToolNameRewritten { path, .. } => path.as_str(),\n"
+        "            crate::migration::MigrationNotice::AssumedV1\n"
+        "            | crate::migration::MigrationNotice::InferredV3\n"
+        "            | crate::migration::MigrationNotice::IgnoredEnvOverride { .. } => continue,\n"
+        "        };\n",
+    )
+
+    # ── the CLI reports the rewrite ─────────────────────────────────────
+    # The CLI matches the notice type exhaustively, so the new variant needs
+    # an arm. It tells the operator which spelling changed and what replaced
+    # it: the old name keeps working, and the notice is the only place that
+    # says so.
+    cli_main = source / "src/main.rs"
+    replace_required(
+        cli_main,
+        "        MigrationNotice::Lowered { path: key, reason } => {\n"
+        "            let reason = match crate::config::migration::capped_reason_id(reason) {\n"
+        "                Some(id) => t(id, reason),\n"
+        "                None => reason.to_string(),\n"
+        "            };\n"
+        "            ta(\n"
+        '                "cli-config-capped-key-lowered",\n'
+        '                &[("key", key), ("path", path), ("reason", &reason)],\n'
+        '                format!("warning: lowered config key `{key}` in {path} to its maximum: {reason}"),\n'
+        "            )\n"
+        "        }\n",
+        "        MigrationNotice::Lowered { path: key, reason } => {\n"
+        "            let reason = match crate::config::migration::capped_reason_id(reason) {\n"
+        "                Some(id) => t(id, reason),\n"
+        "                None => reason.to_string(),\n"
+        "            };\n"
+        "            ta(\n"
+        '                "cli-config-capped-key-lowered",\n'
+        '                &[("key", key), ("path", path), ("reason", &reason)],\n'
+        '                format!("warning: lowered config key `{key}` in {path} to its maximum: {reason}"),\n'
+        "            )\n"
+        "        }\n"
+        "        MigrationNotice::ToolNameRewritten { path, from, to } => {\n"
+        "            ta(\n"
+        '                "cli-config-tool-name-rewritten",\n'
+        '                &[("from", from), ("to", to), ("path", path)],\n'
+        '                format!(\n'
+        '                    "warning: rewrote tool name `{from}` to `{to}` in {path}: the tool is \\\n'
+        '                     now part of the consolidated `{to}` family. The old name still works."\n'
+        "                ),\n"
+        "            )\n"
+        "        }\n",
+    )
+
+    # ── the auto-approve defaults name the family and its members ───────
+    # A member stays callable, so a default that approves the member keeps
+    # approving it. The family name joins it so the consolidated call is
+    # approved on the same grounds. Dropping the member would silently turn
+    # an approved read into one that asks.
+    replace_required(
+        config_schema,
+        '        "file_read".into(),\n        "memory_recall".into(),\n',
+        '        "file_read".into(),\n'
+        "        // The memory family and the read member it carries. The family is\n"
+        "        // the canonical name; `memory_recall` stays, because a member call\n"
+        "        // is still dispatchable and must keep the approval it had.\n"
+        '        "memory".into(),\n        "memory_recall".into(),\n',
+    )
+    replace_required(
+        config_schema,
+        'auto_approve = ["file_read", "file_write", "file_edit", "memory_recall", "memory_store", '
+        '"web_search_tool", "web_fetch", "calculator", "glob_search", "content_search", '
+        '"image_info", "weather", "git_operations"]\n',
+        'auto_approve = ["file_read", "file_write", "file_edit", "memory", "memory_recall", '
+        '"memory_store", "web_search_tool", "web_fetch", "calculator", "glob_search", '
+        '"content_search", "image_info", "weather", "git_operations"]\n',
+    )
+    replace_required(
+        config_schema,
+        '            "file_read",\n            "file_write",\n            "file_edit",\n'
+        '            "memory_recall",\n            "memory_store",\n',
+        '            "file_read",\n            "file_write",\n            "file_edit",\n'
+        '            "memory",\n            "memory_recall",\n            "memory_store",\n',
+    )
+    replace_required(
+        config_schema,
+        '            "file_read",\n            "memory_recall",\n            "weather",\n'
+        '            "calculator",\n            "web_fetch",\n',
+        '            "file_read",\n            "memory",\n            "memory_recall",\n'
+        '            "weather",\n            "calculator",\n            "web_fetch",\n',
+    )
+
+    # ── the chain step ──────────────────────────────────────────────────
+    replace_required(
+        migration,
+        "    // V3 → V4: no shape change; the chain applies the V4 entries in\n"
+        "    // `RETIRED_KEYS` after this step.\n"
+        "    |value| stamp_schema_version(value, 4),\n"
+        "];\n",
+        "    // V3 → V4: no shape change; the chain applies the V4 entries in\n"
+        "    // `RETIRED_KEYS` after this step.\n"
+        "    |value| stamp_schema_version(value, 4),\n"
+        "    // V4 → V5: the consolidated families replaced the per-member tool names,\n"
+        "    // so a tool list that names a member is rewritten to the family that\n"
+        "    // replaced it. The rewrite is forward-only and reports every change.\n"
+        "    |value| rewrite_legacy_tool_names(value),\n"
+        "];\n",
+    )
+
+    # ── the upstream assertions follow the current version ──────────────
+    # The V5 step stamps the version in place, so a migration that used to
+    # land on V4 lands on V5. The assertions that check the *shape* — that
+    # everything but the version keeps its exact bytes, that the retired table
+    # is gone — are unchanged; only the version they expect moves.
+    replace_required(
+        migration,
+        "    fn v3_migration_changes_only_the_version_line() {\n"
+        "        let raw =\n"
+        '            format!("schema_version = 3  # stamped by an older zeroclaw\\n{UNTOUCHED_V3_BODY}");\n'
+        "        let (migrated, notices) = migrate_file_with_notices(&raw).unwrap().unwrap();\n"
+        "        assert!(notices.is_empty(), \"{notices:?}\");\n"
+        "        assert_eq!(\n"
+        "            migrated,\n"
+        '            format!("schema_version = 4  # stamped by an older zeroclaw\\n{UNTOUCHED_V3_BODY}"),\n'
+        '            "everything but the version must keep its exact bytes"\n'
+        "        );\n"
+        "    }\n",
+        "    fn v3_migration_changes_only_the_version_line() {\n"
+        "        let raw =\n"
+        '            format!("schema_version = 3  # stamped by an older zeroclaw\\n{UNTOUCHED_V3_BODY}");\n'
+        "        let (migrated, notices) = migrate_file_with_notices(&raw).unwrap().unwrap();\n"
+        "        assert!(notices.is_empty(), \"{notices:?}\");\n"
+        "        assert_eq!(\n"
+        "            migrated,\n"
+        '            format!("schema_version = 5  # stamped by an older zeroclaw\\n{UNTOUCHED_V3_BODY}"),\n'
+        '            "everything but the version must keep its exact bytes"\n'
+        "        );\n"
+        "    }\n",
+    )
+    replace_required(
+        migration,
+        "        let value: toml::Value = toml::from_str(&migrated).unwrap();\n"
+        "        assert_eq!(detect_version(&value).unwrap(), 4);\n",
+        "        let value: toml::Value = toml::from_str(&migrated).unwrap();\n"
+        "        assert_eq!(detect_version(&value).unwrap(), 5);\n",
+    )
+
+    # ── the report ──────────────────────────────────────────────────────
+    replace_required(
+        migration,
+        "        cur = step(cur)?;\n",
+        "        let before = cur.clone();\n"
+        "        cur = step(cur)?;\n",
+    )
+    replace_required(
+        migration,
+        "        for version in 2..=index as u32 + 1 {\n"
+        "            apply_retired_keys(&mut cur, version, RETIRED_KEYS, notices);\n"
+        "        }\n"
+        "    }\n",
+        "        for version in 2..=index as u32 + 1 {\n"
+        "            apply_retired_keys(&mut cur, version, RETIRED_KEYS, notices);\n"
+        "        }\n"
+        "        // The V5 step rewrites the legacy tool names. The step itself\n"
+        "        // carries no notices, so the rewrite is reported here, where the\n"
+        "        // before-and-after of the step is at hand.\n"
+        "        if index as u32 + 1 == 5 {\n"
+        "            report_rewritten_tool_names(&before, &cur, &mut Vec::new(), notices);\n"
+        "        }\n"
+        "    }\n",
+    )
+
 
 def project_enact_family_early_return(source):
     """Keep early factory exits on the same canonical family surface."""
@@ -4914,6 +6227,32 @@ def project_enact_family_delegate_tests(source):
         composition,
         'first.iter().any(|name| name == "sessions_list")',
         'first.iter().any(|name| name == "sessions")',
+    )
+
+
+def project_enact_approval_argument_tests(source):
+    """Keep upstream's approval-argument assertions aligned with the families.
+
+    Upstream names the tools that receive the runtime `approved` argument.
+    The consolidated family carries them, so the family joins the set — but
+    only the family name does: the members keep the upstream behaviour, and
+    the family resolves its action at call time.
+    """
+    agent_tests = source / "crates/zeroclaw-runtime/src/agent/tests.rs"
+    replace_required(
+        agent_tests,
+        '    let expected = BTreeSet::from(["shell", "schedule", "cron_add", "cron_update", "cron_run"]);\n',
+        '    let expected = BTreeSet::from([\n'
+        '        "shell",\n'
+        '        "schedule",\n'
+        '        "cron_add",\n'
+        '        "cron_update",\n'
+        '        "cron_run",\n'
+        '        // The family that carries them. A family call is judged by the\n'
+        '        // action it names, so the family joins the set; the members\n'
+        '        // keep the behaviour they had.\n'
+        '        "cron",\n'
+        '    ]);\n',
     )
 
 
@@ -6388,6 +7727,9 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
             f"cli-enact-agent-identity = You are {brand['name']}, a fast and efficient AI assistant built in Rust. Be helpful, concise, and direct.\n"
             "cli-enact-updates-disabled = This branded distribution cannot install upstream release binaries. Pull upstream changes into your branding branch and rebuild with python3 overlays/enact/build.py package.\n"
             "cli-enact-desktop-build = Build the branded desktop app with python3 overlays/enact/build.py desktop. Upstream desktop downloads do not include this overlay.\n"
+            # The tool-name rewrite notice: the consolidated families replaced the
+            # legacy member names, and the config migration rewrites them in place.
+            "cli-config-tool-name-rewritten = warning: rewrote tool name `{$from}` to `{$to}` in {$path}: the tool is now part of the consolidated `{$to}` family. The old name still works.\n"
             f"cli-enact-mcp-serving = [{brand['command']}] serving {{ $count }} tools for agent {{ $agent }} (workspace {{ $workspace }})\n"
             f"cli-enact-mcp-empty-policy = [{brand['command']}] the agent's policy exposes no tools; the host will see an empty registry\n"
             f"cli-enact-mcp-default-policy = [{brand['command']}] no configured agent supplied a risk profile; using the default supervised, workspace-only policy\n"
@@ -6501,9 +7843,17 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
     project_enact_component_fixtures(SOURCE, brand)
     project_session_tools(SOURCE)
     project_tool_result_status(SOURCE)
+    # The canonical tool names, the config migration that rewrites the legacy
+    # ones, and the relevance-scored discovery that finds them.
+    project_enact_canonical_tool_names(SOURCE)
+    project_enact_tool_name_migration(SOURCE)
+    project_enact_tool_search_scoring(SOURCE)
     # The advertised tool set is derived, so it is checked against the tree
     # that actually ships, once every projection has added its inventory rows.
     check_enact_tool_inventory(SOURCE)
+    # The API layer resolves a tool name through its own family table; the
+    # two tables must be the same vocabulary.
+    check_enact_canonical_family_agreement()
     run(cargo, "fmt", "--all", cwd=SOURCE)
     print(f"Prepared branded source: {SOURCE}")
     return brand

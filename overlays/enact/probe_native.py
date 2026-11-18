@@ -315,7 +315,7 @@ servers = ["fixture", "missing"]
                     created = request("session/new", {"agent_alias": "probe", "exclude_memory": True}, "new")
                     session = created["session_id"]
                     inventory = request("session/tools", {"session_id": session}, "tools")
-                    assert set(inventory) == {"session_id", "tools"}, inventory
+                    assert set(inventory) == {"session_id", "tools", "families"}, inventory
                     assert inventory["session_id"] == session, inventory
                     assert "shell" in inventory["tools"], inventory
                     assert "delegate" in inventory["tools"], inventory
@@ -323,6 +323,19 @@ servers = ["fixture", "missing"]
                     assert "weather" not in inventory["tools"], inventory
                     assert "fixture__echo" in inventory["tools"], inventory
                     assert "missing__echo" not in inventory["tools"], inventory
+                    # The family contract: every family the session holds is
+                    # named with its actions, and every family is a name the
+                    # session can actually call.
+                    families = inventory["families"]
+                    assert isinstance(families, list), families
+                    for family in families:
+                        assert set(family) == {
+                            "name", "actions", "action_count", "deprecated_members"
+                        }, family
+                        assert family["name"] in inventory["tools"], family
+                        assert family["actions"], f"the family names its actions: {family}"
+                        assert family["action_count"] == len(family["actions"]), family
+                        assert len(set(family["actions"])) == len(family["actions"]), family
                     assert Fixture.calls == 0, "inventory invoked the model provider"
                     assert Fixture.missing_mcp_calls > 0, "missing MCP fixture was not attempted"
                     assert "tools/list" in Fixture.mcp_methods, Fixture.mcp_methods

@@ -504,6 +504,112 @@ pub fn resolve(tool_name: &str, action: Option<&str>) -> Option<(&'static str, &
         .map(|entry| (entry.member, entry.op))
 }
 
+/// The canonical name a tool name resolves to.
+///
+/// A legacy member name resolves to the family that replaced it; a family
+/// name resolves to itself; a name that is neither is not a tool name and
+/// resolves to nothing.
+///
+/// Every name-keyed site in the runtime goes through this one function, so a
+/// legacy name and its canonical form cannot drift apart: the site asks what
+/// the name means, not what it is spelled.
+///
+/// The table itself lives in the API layer, because every crate that keys on
+/// a tool name depends on it and none of them may depend on the runtime.
+#[must_use]
+pub fn canonical_name(name: &str) -> Option<&'static str> {
+    zeroclaw_api::canonical_tools::canonical_tool_name(name)
+}
+
+/// The canonical name for a tool name, or the name itself when it is not a
+/// legacy member.
+///
+/// This is the form a name-keyed site wants when the name is not a tool name
+/// at all — a shell command, a channel id, a free-text label. Those keep
+/// their spelling.
+#[must_use]
+pub fn canonical_or_self(name: &str) -> &str {
+    zeroclaw_api::canonical_tools::canonical_tool_name_or_self(name)
+}
+
+/// The family → actions contract, for a platform that must learn the
+/// vocabulary rather than guess it.
+///
+/// The actions come from the same [`family_actions`] derivation that builds
+/// the advertised `action` enum, so the contract and the tool schema cannot
+/// disagree: one table decides both.
+///
+/// `deprecated_members` lists the legacy names the family replaces. It is
+/// populated while the legacy names still work, so a consumer can admit them
+/// today and drop them later without a flag day; it is empty once the
+/// legacy names are gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FamilyContract {
+    /// The canonical family name.
+    pub name: &'static str,
+    /// The family-level action names, in the order the enum lists them.
+    pub actions: Vec<String>,
+    /// The legacy member names this family replaces.
+    pub deprecated_members: Vec<&'static str>,
+}
+
+impl FamilyContract {
+    /// How many actions the family exposes.
+    #[must_use]
+    pub fn action_count(&self) -> usize {
+        self.actions.len()
+    }
+}
+
+/// The contract for every family whose members are present in `registry`.
+///
+/// A family with no member present is not built, because the canonical tool
+/// would advertise actions the agent cannot run. The contract follows the
+/// same rule: it lists a family only when the registry actually holds one
+/// of its members, so a consumer is never told about a family the session
+/// cannot call.
+///
+/// The registry is named by its tool names rather than by the tools
+/// themselves: the contract says which families and actions exist, not what
+/// the tools are, and the runtime's registry owns its tools by value.
+#[must_use]
+pub fn family_contracts<I, S>(registry_names: I) -> Vec<FamilyContract>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let present: HashSet<String> = registry_names
+        .into_iter()
+        .map(|name| name.as_ref().to_string())
+        .collect();
+    FAMILIES
+        .iter()
+        .filter_map(|family| {
+            let members: Vec<&'static str> = family
+                .members
+                .iter()
+                .copied()
+                .filter(|member| present.contains(*member))
+                .collect();
+            if members.is_empty() {
+                return None;
+            }
+            let member_set: HashSet<&str> = members.iter().copied().collect();
+            Some(FamilyContract {
+                name: family.name,
+                actions: family_actions(family)
+                    .into_iter()
+                    // An action whose member is missing cannot run, so it is
+                    // not part of the contract either.
+                    .filter(|entry| member_set.contains(entry.member))
+                    .map(|entry| entry.action)
+                    .collect(),
+                deprecated_members: members,
+            })
+        })
+        .collect()
+}
+
 /// One action of a family.
 struct FamilyAction {
     /// The family-level action name.
@@ -595,6 +701,55 @@ fn describe(family: &Family, actions: &[FamilyAction]) -> String {
     format!("{}\n\nActions:\n{}", family.description, lines.join("\n"))
 }
 
+/// The largest schema a family advertises, in chars.
+///
+/// The member parameters are the useful part of the consolidated schema, and
+/// they are also the part that grows. A family whose branches would exceed
+/// this budget falls back to the bounded action enum, and the model recovers
+/// the parameters with `tool_search` — the same escape hatch that works
+/// today, and one the schema's own description points at.
+const FAMILY_SCHEMA_MAX_CHARS: usize = 2000;
+
+/// The member's own parameter schema, as a branch of the family schema.
+///
+/// The member declares the parameters for its whole contract. A member that
+/// takes its operation as an `action` argument contributes the branch for
+/// that operation alone, with the member's own `action` argument removed —
+/// the family's `action` already says which operation runs.
+fn member_branch(tool: &dyn Tool, op: &str, action_backed: bool) -> Option<Value> {
+    let schema = tool.parameters_schema();
+    let properties = schema.get("properties").and_then(Value::as_object)?;
+    if properties.is_empty() {
+        return None;
+    }
+    let mut branch_properties = properties.clone();
+    if action_backed {
+        branch_properties.remove("action");
+        if branch_properties.is_empty() {
+            return None;
+        }
+    }
+    let mut branch = json!({
+        "type": "object",
+        "properties": branch_properties,
+    });
+    if let Some(required) = schema.get("required").and_then(Value::as_array) {
+        let required: Vec<Value> = required
+            .iter()
+            .filter(|name| {
+                // The family's own `action` argument is not the member's.
+                !(action_backed && name.as_str() == Some("action"))
+            })
+            .cloned()
+            .collect();
+        if !required.is_empty() {
+            branch["required"] = Value::Array(required);
+        }
+    }
+    let _ = op;
+    Some(branch)
+}
+
 impl Attributable for FamilyTool {
     fn role(&self) -> Role {
         Role::Tool(ToolKind::Plugin)
@@ -635,11 +790,16 @@ impl Tool for FamilyTool {
     }
 
     fn parameters_schema(&self) -> Value {
-        // The schema is bounded: the family declares its action enum and
-        // nothing else. The members' own parameters differ from one member
-        // to the next, and a union of them would be both wrong and large;
-        // the action decides which reading applies.
-        json!({
+        // The schema carries the action enum and, where it fits, the
+        // parameters each action takes. The members' own parameters differ
+        // from one member to the next, so they are bound to the action that
+        // selects them: a union of them would be both wrong and large.
+        //
+        // The schema stays bounded. A family whose branches would exceed the
+        // budget advertises the action enum alone, and the model recovers the
+        // parameters with `tool_search` — the same mechanism that carries the
+        // full schema for a deferred tool.
+        let mut schema = json!({
             "type": "object",
             "properties": {
                 "action": {
@@ -650,7 +810,42 @@ impl Tool for FamilyTool {
             },
             "required": ["action"],
             "additionalProperties": true,
-        })
+        });
+
+        let mut branches = Vec::new();
+        for action in &self.actions {
+            let Some(branch) = member_branch(
+                action.tool.as_ref(),
+                action.op,
+                action.action_backed,
+            ) else {
+                continue;
+            };
+            branches.push(json!({
+                "if": {
+                    "properties": {
+                        "action": { "const": action.action },
+                    },
+                    "required": ["action"],
+                },
+                "then": branch,
+            }));
+        }
+
+        if branches.is_empty() {
+            return schema;
+        }
+        schema["allOf"] = Value::Array(branches);
+        // The budget is checked on the rendered schema, so it measures what
+        // the provider actually receives.
+        if schema.to_string().chars().count() > FAMILY_SCHEMA_MAX_CHARS {
+            schema.as_object_mut().expect("the schema is an object").remove("allOf");
+            schema["properties"]["action"]["description"] = json!(
+                "Which operation to run. Call tool_search with \"select:<action>\" \
+                 to fetch this action's full parameters."
+            );
+        }
+        schema
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
@@ -1044,14 +1239,190 @@ mod tests {
         let schema = tool.parameters_schema();
         assert_eq!(schema["properties"]["action"]["enum"], json!(["cron_add"]));
         assert_eq!(schema["required"], json!(["action"]));
-        // The schema is bounded: the member's own parameters are not merged
-        // into it, because they differ from one action to the next.
-        assert_eq!(
-            schema["properties"].as_object().unwrap().len(),
-            1,
-            "only the action is declared"
-        );
         assert_eq!(schema["additionalProperties"], json!(true));
+    }
+
+    /// A tool whose parameters the family can bind to an action.
+    struct Parameterised {
+        name: &'static str,
+        /// Whether the tool's own schema declares an `action` argument.
+        declares_action: bool,
+        /// Whether the tool's schema carries a realistic set of parameters.
+        rich: bool,
+    }
+
+    #[async_trait]
+    impl Tool for Parameterised {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "a tool with parameters"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            let mut properties = serde_json::Map::new();
+            properties.insert(
+                "command".to_string(),
+                json!({"type": "string", "description": "The command to run."}),
+            );
+            properties.insert("optional".to_string(), json!({"type": "number"}));
+            let mut required = vec![json!("command")];
+            if self.declares_action {
+                properties.insert("action".to_string(), json!({"type": "string"}));
+                required.push(json!("action"));
+            }
+            if self.rich {
+                // A realistic member carries a parameter per field, each with a
+                // description — the shape that makes a family's branches grow.
+                for index in 0..8 {
+                    let name = format!("parameter_{index}");
+                    properties.insert(
+                        name.clone(),
+                        json!({
+                            "type": "string",
+                            "description": format!(
+                                "The {name} of the operation, described at some length so \
+                                 the family schema carries a realistic amount of text."
+                            ),
+                        }),
+                    );
+                    required.push(json!(name));
+                }
+            }
+            json!({
+                "type": "object",
+                "properties": Value::Object(properties),
+                "required": Value::Array(required),
+            })
+        }
+
+        async fn execute(&self, _args: Value) -> anyhow::Result<ToolResult> {
+            Ok(ToolResult::ok("done"))
+        }
+    }
+
+    impl Attributable for Parameterised {
+        fn role(&self) -> Role {
+            Role::Tool(ToolKind::Plugin)
+        }
+
+        fn alias(&self) -> &str {
+            self.name
+        }
+    }
+
+    #[tokio::test]
+    async fn a_family_schema_binds_each_action_to_its_parameters() {
+        // The member's parameters are the useful part of the consolidated
+        // schema, and they are bound to the action that selects them.
+        let member = Arc::new(Parameterised {
+            name: "cron_add",
+            declares_action: false,
+            rich: false,
+        });
+        let tool = FamilyTool::build(
+            family("cron"),
+            vec![member as Arc<dyn Tool>],
+        )
+        .unwrap();
+        let schema = tool.parameters_schema();
+        let branches = schema["allOf"].as_array().expect("the branches are listed");
+        assert_eq!(branches.len(), 1);
+        assert_eq!(
+            branches[0]["if"]["properties"]["action"]["const"],
+            json!("cron_add")
+        );
+        let then = &branches[0]["then"];
+        assert_eq!(
+            then["properties"]["command"]["type"],
+            json!("string"),
+            "the member's own parameter is declared"
+        );
+        assert_eq!(
+            then["required"],
+            json!(["command"]),
+            "the member's own parameters are required"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_family_schema_drops_the_members_own_action_argument() {
+        // A member that takes its operation as an `action` argument
+        // contributes a branch per operation: the family's `action` already
+        // says which operation runs, so the member's own `action` argument is
+        // the family's business, not the model's.
+        //
+        // The `mcp` family is used here because `mcp_resources` carries two
+        // operations: two branches stay inside the schema budget, so the
+        // branches are actually advertised.
+        let member = Arc::new(Parameterised {
+            name: "mcp_resources",
+            declares_action: true,
+            rich: false,
+        });
+        let tool = FamilyTool::build(
+            family("mcp"),
+            vec![member as Arc<dyn Tool>],
+        )
+        .unwrap();
+        let schema = tool.parameters_schema();
+        let branches = schema["allOf"].as_array().expect("the branches are listed");
+        // `mcp_resources` carries two operations, so it contributes two branches.
+        assert_eq!(branches.len(), 2);
+        for branch in branches {
+            let then = &branch["then"];
+            assert!(
+                then["properties"].get("action").is_none(),
+                "the member's own action argument is not the family's: {then}"
+            );
+            assert_eq!(
+                then["required"],
+                json!(["command"]),
+                "the member's own parameters stay required"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_family_schema_stays_within_its_budget() {
+        // A family whose branches would exceed the budget advertises the
+        // action enum alone, and points at `tool_search`.
+        //
+        // The real `cron` family carries fifteen actions; each branch binds
+        // the parameters of the member that backs it.
+        let members: Vec<Arc<dyn Tool>> = MEMBERS
+            .iter()
+            .filter(|member| family_of(member.tool).is_some_and(|f| f.name == "cron"))
+            .map(|member| {
+                Arc::new(Parameterised {
+                    name: member.tool,
+                    declares_action: member.action_backed,
+                    rich: true,
+                }) as Arc<dyn Tool>
+            })
+            .collect();
+        let tool = FamilyTool::build(family("cron"), members).unwrap();
+        let schema = tool.parameters_schema();
+        assert!(
+            schema.to_string().chars().count() <= FAMILY_SCHEMA_MAX_CHARS + 200,
+            "the schema stays bounded: {} chars",
+            schema.to_string().chars().count()
+        );
+        // The bounded schema keeps the action enum and points at the escape
+        // hatch, so the model can still recover the full parameters.
+        assert!(
+            schema.get("allOf").is_none(),
+            "the branches are dropped once they exceed the budget"
+        );
+        assert!(
+            schema["properties"]["action"]["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("tool_search"),
+            "the bounded schema points at tool_search: {schema}"
+        );
     }
 
     #[test]
@@ -1114,5 +1485,73 @@ mod tests {
         // whatever the table says, and the table is what the operations
         // inventory is checked against.
         assert_eq!(legacy_member_names().len(), MEMBERS.len());
+    }
+
+    #[test]
+    fn a_legacy_name_resolves_to_its_family_and_a_family_to_itself() {
+        assert_eq!(canonical_name("cron_add"), Some("cron"));
+        assert_eq!(canonical_name("schedule"), Some("cron"));
+        assert_eq!(canonical_name("memory_recall"), Some("memory"));
+        assert_eq!(canonical_name("cron"), Some("cron"));
+        assert_eq!(canonical_name("shell"), None);
+        assert_eq!(canonical_name("not_a_tool"), None);
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_tool_keeps_its_spelling() {
+        assert_eq!(canonical_or_self("cron_add"), "cron");
+        assert_eq!(canonical_or_self("cron"), "cron");
+        assert_eq!(canonical_or_self("shell"), "shell");
+        assert_eq!(canonical_or_self("bash -lc ls"), "bash -lc ls");
+    }
+
+    #[test]
+    fn a_contract_lists_only_the_families_the_registry_holds() {
+        let contracts = family_contracts(["cron_add"]);
+        assert_eq!(contracts.len(), 1, "only the cron family is present");
+        let cron = &contracts[0];
+        assert_eq!(cron.name, "cron");
+        assert_eq!(cron.actions, vec!["cron_add".to_string()]);
+        assert_eq!(cron.deprecated_members, vec!["cron_add"]);
+        assert_eq!(cron.action_count(), 1);
+    }
+
+    #[test]
+    fn a_contract_hides_an_action_whose_member_is_missing() {
+        // The family table names every action; the contract lists only the
+        // ones whose member the registry actually holds.
+        let contract = &family_contracts(["cron_add"])[0];
+        assert!(
+            !contract.actions.contains(&"schedule_add".to_string()),
+            "the schedule member is absent, so its actions are not offered"
+        );
+    }
+
+    #[test]
+    fn a_contract_lists_no_family_the_registry_lacks() {
+        assert!(family_contracts(Vec::<String>::new()).is_empty());
+        assert!(
+            family_contracts(["shell", "file_read"]).is_empty(),
+            "no family has a member here"
+        );
+    }
+
+    #[test]
+    fn a_contract_matches_the_advertised_action_enum() {
+        // The contract and the tool schema are two views of one derivation.
+        // A consumer that reads the contract and a model that reads the
+        // schema must be told the same thing.
+        let (schedule, _) = Fake::named("schedule");
+        let (cron_add, _) = Fake::named("cron_add");
+        let registry = vec![
+            Arc::clone(&schedule) as Arc<dyn Tool>,
+            Arc::clone(&cron_add) as Arc<dyn Tool>,
+        ];
+        let tool = FamilyTool::build(family("cron"), registry.clone()).unwrap();
+        let contract = family_contracts(["schedule", "cron_add"])
+            .into_iter()
+            .find(|contract| contract.name == "cron")
+            .expect("the cron family is present");
+        assert_eq!(contract.actions, tool.action_names());
     }
 }

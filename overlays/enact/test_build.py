@@ -2,6 +2,8 @@
 import importlib.util
 import inspect
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 import shutil
@@ -256,6 +258,174 @@ class WorkspacePathProjectionTests(unittest.TestCase):
         self.assertNotIn('researcher/workspace/host.md', exporter)
 
 
+class CanonicalToolNamesProjectionTests(unittest.TestCase):
+    """The canonical-name table and the sites that resolve through it."""
+
+    def prepare(self, paths):
+        source = Path(tempfile.mkdtemp())
+        for relative in paths:
+            target = source / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(build.ROOT / relative, target)
+        return source
+
+    def test_the_api_table_is_copied_in_and_agrees_with_the_family_module(self):
+        paths = ["crates/zeroclaw-api/src/lib.rs",
+                 "crates/zeroclaw-api/src/tool.rs",
+                 "crates/zeroclaw-api/src/runtime_traits.rs",
+                 "crates/zeroclaw-config/src/policy.rs",
+                 "crates/zeroclaw-channels/src/orchestrator/mod.rs",
+                 "crates/zeroclaw-channels/src/orchestrator/acp_server.rs",
+                 "crates/zeroclaw-runtime/src/agent/mod.rs"]
+        source = self.prepare(paths)
+        build.project_enact_canonical_tool_names(source)
+        self.assertTrue((source / "crates/zeroclaw-api/src/canonical_tools.rs").is_file())
+        api_lib = (source / paths[0]).read_text()
+        self.assertIn("pub mod canonical_tools;", api_lib)
+        api_tool = (source / paths[1]).read_text()
+        self.assertIn("pub fn takes_runtime_approval_for_call", api_tool)
+        self.assertIn('"cron_add" | "update" | "run"', api_tool)
+        api_traits = (source / paths[2]).read_text()
+        self.assertIn('&["shell", "cron"]', api_traits)
+        self.assertIn("crate::canonical_tools::canonical_tool_name(name)", api_traits)
+        policy = (source / paths[3]).read_text()
+        self.assertIn("pub fn is_tool_allowed_canonical", policy)
+        channels = (source / paths[4]).read_text()
+        self.assertIn("canonical_tool_name", channels)
+        acp = (source / paths[5]).read_text()
+        self.assertIn("canonical_tool_name", acp)
+        agent = (source / paths[6]).read_text()
+        self.assertIn("is_runtime_approved_arg_call", agent)
+
+    def test_the_api_table_and_the_overlay_family_table_agree(self):
+        build.check_enact_canonical_family_agreement()
+
+    def test_a_divergent_api_table_fails_the_build(self):
+        families, _ = build._family_table(
+            build.ROOT / "overlays/enact/native/tools/families.rs")
+        api = build._api_canonical_families()
+        self.assertEqual(families, api)
+        self.assertTrue(families)
+        self.assertTrue(api)
+
+
+class ToolNameMigrationProjectionTests(unittest.TestCase):
+    """The config migration that rewrites the legacy tool names."""
+
+    def copy_inputs(self, source):
+        for relative in ("crates/zeroclaw-config/src/migration.rs",
+                         "crates/zeroclaw-config/src/schema.rs",
+                         "src/main.rs"):
+            target = source / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(build.ROOT / relative, target)
+
+    def test_the_chain_carries_the_rewrite_and_the_notice(self):
+        source = Path(tempfile.mkdtemp())
+        self.copy_inputs(source)
+        build.project_enact_tool_name_migration(source)
+        text = (source / "crates/zeroclaw-config/src/migration.rs").read_text()
+        self.assertIn("pub const CURRENT_SCHEMA_VERSION: u32 = 5;", text)
+        self.assertIn("ToolNameRewritten {", text)
+        self.assertIn("fn rewrite_legacy_tool_names(", text)
+        self.assertIn("|value| rewrite_legacy_tool_names(value),", text)
+        self.assertIn("report_rewritten_tool_names(&before, &cur", text)
+
+    def test_the_cli_reports_the_rewrite(self):
+        """The CLI matches the notice type exhaustively, so it needs the arm."""
+        source = Path(tempfile.mkdtemp())
+        self.copy_inputs(source)
+        build.project_enact_tool_name_migration(source)
+        text = (source / "src/main.rs").read_text()
+        self.assertIn("MigrationNotice::ToolNameRewritten { path, from, to } =>", text)
+        self.assertIn('"cli-config-tool-name-rewritten"', text)
+
+    def test_the_auto_approve_defaults_name_the_family_and_its_members(self):
+        source = Path(tempfile.mkdtemp())
+        self.copy_inputs(source)
+        build.project_enact_tool_name_migration(source)
+        text = (source / "crates/zeroclaw-config/src/schema.rs").read_text()
+        # The family is the canonical name and joins the default.
+        self.assertIn('"memory".into(),', text)
+        # The member keeps its place: a member call is still dispatchable, so
+        # dropping it would silently turn an approved read into one that asks.
+        self.assertIn('"memory_recall".into(),', text)
+
+
+class ToolSearchScoringProjectionTests(unittest.TestCase):
+    """The relevance-scored discovery and the compressed catalogue."""
+
+    def test_the_scorer_is_copied_in_and_the_catalogue_is_short(self):
+        paths = ["crates/zeroclaw-tools/src/lib.rs",
+                 "crates/zeroclaw-tools/src/mcp_deferred.rs",
+                 "crates/zeroclaw-tools/src/tool_search.rs"]
+        source = Path(tempfile.mkdtemp())
+        for relative in paths:
+            target = source / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(build.ROOT / relative, target)
+        build.project_enact_tool_search_scoring(source)
+        self.assertTrue((source / "crates/zeroclaw-tools/src/tool_search_score.rs").is_file())
+        tools_lib = (source / paths[0]).read_text()
+        self.assertIn("pub mod tool_search_score;", tools_lib)
+        deferred = (source / paths[1]).read_text()
+        self.assertIn("const DEFERRED_BUILTIN_SUMMARY_MAX_CHARS: usize = 30;", deferred)
+        self.assertIn("fn deferred_builtin_summary_line(", deferred)
+        self.assertNotIn("fn deferred_search_score(", deferred)
+        # The catalogue names the family, not the member it replaced.
+        self.assertIn("is_legacy_tool_member(&spec.name)", deferred)
+        search = (source / paths[2]).read_text()
+        self.assertIn("MAX_SEARCH_TOOL_REFERENCES", search)
+        self.assertIn("SEARCH_TOKEN_BUDGET", search)
+        self.assertIn("score_candidate(", search)
+        self.assertNotIn("deferred_search_score", search)
+
+
+class ToolContractTests(unittest.TestCase):
+    """The generated contract a host reads."""
+
+    def test_the_contract_is_current(self):
+        self.assertEqual(
+            subprocess.run(
+                [sys.executable, str(build.ROOT / "overlays/enact/contract/generate_contract.py"),
+                 "--check"],
+                capture_output=True, text=True, check=False).returncode,
+            0,
+            "the committed contract is stale",
+        )
+
+    def test_the_operations_inventory_is_current(self):
+        self.assertEqual(
+            subprocess.run(
+                [sys.executable,
+                 str(build.ROOT / "overlays/enact/contract/generate_operations_csv.py"),
+                 "--check"],
+                capture_output=True, text=True, check=False).returncode,
+            0,
+            "the committed operations inventory is stale",
+        )
+
+    def test_the_inventory_lists_families_and_no_legacy_members(self):
+        rows = (build.ROOT / "overlays/enact/zeroclaw-tools-operations.csv").read_text().splitlines()[1:]
+        tools = {line.split(",", 1)[0].lstrip("#") for line in rows if line.strip()}
+        families, _ = build._family_table(
+            build.ROOT / "overlays/enact/native/tools/families.rs")
+        for family, members in families.items():
+            self.assertIn(family, tools, f"{family} is advertised")
+            for member in members:
+                self.assertNotIn(member, tools, f"{member} is no longer advertised")
+
+    def test_the_contract_names_every_family_and_its_actions(self):
+        contract = json.loads(
+            (build.ROOT / "overlays/enact/contract/tool-contract.json").read_text())
+        families, _ = build._family_table(
+            build.ROOT / "overlays/enact/native/tools/families.rs")
+        self.assertEqual(set(contract["families"]), set(families))
+        for family, actions in contract["families"].items():
+            self.assertTrue(actions["actions"], f"{family} names its actions")
+        self.assertEqual(len(contract["legacy_members"]), 36)
+
+
 class SessionToolsProjectionTests(unittest.TestCase):
     def test_actual_upstream_rpc_guards_registry_and_inventory_getter(self):
         paths = ["crates/zeroclaw-runtime/src/rpc/dispatch.rs",
@@ -294,6 +464,14 @@ class SessionToolsProjectionTests(unittest.TestCase):
             self.assertNotIn('self.ctx.config', handler)
             self.assertNotIn('provider', handler)
             self.assertNotIn('#[cfg(test)]\n    pub fn tool_names', (source / paths[1]).read_text())
+            # The family contract travels with the names, and it is read from
+            # the same assembled registry — not from a config projection.
+            self.assertIn('pub struct SessionFamilyContract {', proto_types)
+            self.assertIn('pub families: Vec<SessionFamilyContract>', proto_types)
+            self.assertIn('SessionFamilyContract,', catalog)
+            self.assertIn('crate::tools::families::family_contracts(', handler)
+            self.assertIn('agent.tool_names_owned()', handler)
+            self.assertNotIn('self.ctx.config', handler)
             with self.assertRaisesRegex(RuntimeError, 'Upstream overlay drift'):
                 build.project_session_tools(source)
 
@@ -450,15 +628,44 @@ class CanonicalToolInventoryTests(unittest.TestCase):
         self.assertTrue(operations)
         self.assertTrue(families)
         self.assertEqual(build.enact_canonical_tool_names(), operations | families)
-        # The family tools are canonical names in their own right: the
-        # consolidation adds inventory rows the operations inventory does
-        # not list, which is why the advertised count is derived.
-        self.assertFalse(families & operations)
+        # The family tools are canonical names in their own right, and the
+        # operations inventory lists them: the inventory is the advertised
+        # surface, and a family is what is advertised.
+        self.assertTrue(families <= operations, "every family is advertised")
+        # The legacy members are not advertised: the family is the name the
+        # model learns, and a member would offer the same capability twice.
+        for members in self.family_members().values():
+            for member in members:
+                self.assertNotIn(member, operations, f"{member} is no longer advertised")
+
+    def family_members(self):
+        text = (build.ROOT / "overlays/enact/native/tools/families.rs").read_text()
+        members = {}
+        for match in re.finditer(
+            r'name:\s*"([^"]+)",\s*\n\s*description:\s*"[^"]*",\s*\n\s*members:\s*&\[(.*?)\]',
+            text,
+            re.S,
+        ):
+            members[match.group(1)] = re.findall(r'"([^"]+)"', match.group(2))
+        return members
 
     def test_guard_accepts_the_canonical_tool_set(self):
         with tempfile.TemporaryDirectory() as name:
             source = Path(name)
             self.write_inventory(source, sorted(build.enact_canonical_tool_names()))
+            build.check_enact_tool_inventory(source)
+
+    def test_guard_accepts_an_inventory_that_also_lists_the_legacy_members(self):
+        """A member stays registered, so the inventory keeps listing it.
+
+        The member is dispatchable; the family is what the model is offered.
+        The two sets therefore differ by exactly the member names.
+        """
+        expected = build.enact_canonical_tool_names()
+        members = build.enact_family_member_names()
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            self.write_inventory(source, sorted(expected | members))
             build.check_enact_tool_inventory(source)
 
     def test_guard_fails_closed_when_a_canonical_tool_is_missing(self):
@@ -467,7 +674,7 @@ class CanonicalToolInventoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as name:
             source = Path(name)
             self.write_inventory(source, sorted(expected - {missing}))
-            with self.assertRaisesRegex(RuntimeError, "missing from the inventory"):
+            with self.assertRaisesRegex(RuntimeError, "missing tools"):
                 build.check_enact_tool_inventory(source)
 
     def test_guard_fails_closed_when_an_unlisted_tool_is_registered(self):
@@ -475,7 +682,7 @@ class CanonicalToolInventoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as name:
             source = Path(name)
             self.write_inventory(source, sorted(expected | {"not_a_canonical_tool"}))
-            with self.assertRaisesRegex(RuntimeError, "registered but not listed"):
+            with self.assertRaisesRegex(RuntimeError, "not family members"):
                 build.check_enact_tool_inventory(source)
 
     def test_guard_fails_closed_when_a_tool_is_repeated(self):
@@ -490,13 +697,17 @@ class CanonicalToolInventoryTests(unittest.TestCase):
         upstream = build.ROOT / "crates/zeroclaw-tools/src/inventory.rs"
         names = set(re.findall(r'^\s+name: "([^"]+)",$', upstream.read_text(), flags=re.MULTILINE))
         expected = build.enact_canonical_tool_names()
-        self.assertTrue(names < expected, "upstream must be a strict subset of the canonical set")
+        # The upstream inventory still lists the legacy members and does not
+        # list the families, so it does not satisfy the canonical set. The
+        # overlay's projections close the gap.
+        self.assertNotEqual(names, expected, "upstream must not satisfy the canonical set")
+        self.assertTrue(expected - names, "the families are added by the overlay")
         with tempfile.TemporaryDirectory() as name:
             source = Path(name)
             target = source / "crates/zeroclaw-tools/src/inventory.rs"
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(upstream, target)
-            with self.assertRaisesRegex(RuntimeError, "missing from the inventory"):
+            with self.assertRaisesRegex(RuntimeError, "missing tools"):
                 build.check_enact_tool_inventory(source)
 
     def test_prepare_checks_the_inventory_it_ships(self):
