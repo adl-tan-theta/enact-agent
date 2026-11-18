@@ -324,9 +324,25 @@ jobs:
     needs: [master-debounce]
     if: ${{ !cancelled() && needs.master-debounce.result != 'failure' }}
     runs-on: ubuntu-24.04
-    # Measured green run on b86b1737: rustdoc step 2m22s, total Lint 10m40s
-    # (under the prior 15m ceiling). Keep 15 unless a cold-cache run proves more.
-    timeout-minutes: 15
+    # Upstream sized this ceiling on a Blacksmith `8vcpu` runner, where the job
+    # measured 10m40s. This fork runs the same job on GitHub-hosted
+    # `ubuntu-24.04` -- 4 vCPU, and a cold cache, because `adl-tan-theta` is a
+    # user account with no organisation to inherit a Blacksmith installation
+    # from. The clippy and rustdoc commands are byte-identical to upstream's;
+    # only the hardware differs, and halving the vCPU count roughly doubles the
+    # wall clock.
+    #
+    # A cold-cache run then proved more, which is exactly the condition the
+    # original note said to watch for. Run 44312419349 on 17597a598 measured
+    # clippy at 10m27s and rustdoc at 3m50s, and the job was still inside the
+    # comment-hygiene gate when it hit the 15m ceiling -- it needed roughly 17m.
+    # The clippy step alone now exceeds the old budget.
+    #
+    # 30 gives a cold run about 1.7x the time it actually needs, which leaves
+    # room for a slower mirror or a larger cache miss without the gate failing
+    # on a machine that was never broken. The ceiling is a backstop against a
+    # hung job, not a target.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
