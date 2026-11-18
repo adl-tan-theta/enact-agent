@@ -81,6 +81,59 @@ fn the_release_workflow_publishes_assets_the_installer_can_find() {
 }
 
 #[test]
+fn no_workflow_compares_a_glob_as_a_literal_string() {
+    // `test "$x" = "prefix"*suffix` never matches: the right-hand side of
+    // `=` in `test` is a literal string, so the glob is never applied and the
+    // comparison is always false. `case` is what matches a pattern.
+    //
+    // This cost a full release build once: the archive had been packaged
+    // correctly and the assertion that was supposed to check its name
+    // rejected it, failing the run after the expensive work was already
+    // done. The failure is silent -- the assertion looks like a plausible
+    // check -- so it is checked here instead of being found in a build log.
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows");
+    let mut offenders = Vec::new();
+    let mut scanned = 0;
+    for entry in fs::read_dir(&directory)
+        .unwrap_or_else(|error| panic!("failed to list {}: {error}", directory.display()))
+    {
+        let entry = entry.expect("readable workflow directory entry");
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let text = fs::read_to_string(entry.path())
+            .unwrap_or_else(|error| panic!("failed to read {name}: {error}"));
+        scanned += 1;
+        for (index, line) in text.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            // A `test`/`[` comparison whose right-hand side carries a glob.
+            let is_test = trimmed.starts_with("test ") || trimmed.starts_with("[ ");
+            if !is_test {
+                continue;
+            }
+            let Some((_, right)) = trimmed.split_once('=') else {
+                continue;
+            };
+            // `==` is still a literal comparison in `test`; only `case`
+            // matches a pattern.
+            if right.trim_start().starts_with('=') {
+                continue;
+            }
+            if right.contains('*') || right.contains('?') {
+                offenders.push(format!("{name}:{}: {}", index + 1, trimmed));
+            }
+        }
+    }
+    assert!(scanned > 0, "no workflow files in {}", directory.display());
+    assert!(
+        offenders.is_empty(),
+        "a `test` comparison treats its right-hand side as a literal string, so a \
+         glob there never matches. Use `case` to match a pattern: {offenders:?}"
+    );
+}
+
+#[test]
 fn the_release_workflow_publishes_the_distribution_as_latest() {
     let workflow = release_workflow();
 
