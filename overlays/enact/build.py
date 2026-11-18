@@ -5330,7 +5330,7 @@ fn rewrite_tool_names_in_value(value: &mut toml::Value, path: &mut Vec<String>) 
     }
 }
 
-fn rewrite_tool_names_in_array(items: &mut Vec<toml::Value>) {
+fn rewrite_tool_names_in_array(items: &mut [toml::Value]) {
     for item in items.iter_mut() {
         let toml::Value::String(name) = item else {
             continue;
@@ -7466,6 +7466,35 @@ def project_enact_matrix_safe_policy(source):
     )
 
 
+def project_enact_build_marker(source):
+    """Define the branded build marker so every build of the crate compiles.
+
+    The branded build marker gates the "build from source" paths in the CLI.
+    It is read with `env!`, which is a *compile-time* read: the variable must
+    exist for every build of the crate, not only for the release one. Without
+    this, a plain `cargo build` or `cargo clippy` fails to compile the
+    `zeroclaw` package.
+
+    The root `build.rs` therefore defines it, defaulting to empty so an
+    ordinary build compiles, and the release build sets `ENACT_AGENT_BUILD=1`
+    in the environment to turn the marker on.
+    `cargo:rerun-if-env-changed` makes cargo rebuild when the environment
+    value changes, so the marker is never stale.
+    """
+    replace_required(
+        source / "build.rs",
+        '    println!("cargo:rerun-if-changed=build.rs");\n',
+        '    println!("cargo:rerun-if-changed=build.rs");\n'
+        '    // The branded build marker, defaulted so every build of this crate\n'
+        '    // compiles. The release build sets it to "1" in the environment.\n'
+        '    println!(\n'
+        '        "cargo:rustc-env=ENACT_AGENT_BUILD={}",\n'
+        '        std::env::var("ENACT_AGENT_BUILD").unwrap_or_default()\n'
+        '    );\n'
+        '    println!("cargo:rerun-if-env-changed=ENACT_AGENT_BUILD");\n',
+    )
+
+
 def project_enact_branding_consistency(source):
     """Keep the branded tree's own expectations in step with its branding.
 
@@ -7835,6 +7864,7 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
                      '            if do_install && !env!("ENACT_AGENT_BUILD").is_empty() {\n'
                      '                bail!(t("cli-enact-desktop-build", "Build the branded desktop app from source."));\n'
                      '            }\n            if do_install {\n')
+    project_enact_build_marker(SOURCE)
     name_lookup = 'crate::i18n::get_required_cli_string("cli-enact-agent-name")'
     replace_required(SOURCE / "crates/zeroclaw-runtime/src/agent/personality_templates/mod.rs",
                      'agent: "ZeroClaw".to_string(),', f"agent: {name_lookup},")

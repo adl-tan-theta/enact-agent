@@ -315,7 +315,8 @@ class ToolNameMigrationProjectionTests(unittest.TestCase):
     def copy_inputs(self, source):
         for relative in ("crates/zeroclaw-config/src/migration.rs",
                          "crates/zeroclaw-config/src/schema.rs",
-                         "src/main.rs"):
+                         "src/main.rs",
+                         "build.rs"):
             target = source / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(build.ROOT / relative, target)
@@ -350,6 +351,23 @@ class ToolNameMigrationProjectionTests(unittest.TestCase):
         # The member keeps its place: a member call is still dispatchable, so
         # dropping it would silently turn an approved read into one that asks.
         self.assertIn('"memory_recall".into(),', text)
+
+    def test_the_build_marker_is_defined_for_every_build(self):
+        """`env!` is a compile-time read, so the variable must always exist.
+
+        The branded build marker gates the "build from source" paths in the
+        CLI. It is read with `env!`, which means a plain `cargo build` or
+        `cargo clippy` fails to compile unless the variable is defined. The
+        root `build.rs` therefore defines it, defaulting to empty, and the
+        release build sets it to "1" in the environment.
+        """
+        source = Path(tempfile.mkdtemp())
+        self.copy_inputs(source)
+        build.project_enact_build_marker(source)
+        text = (source / "build.rs").read_text()
+        self.assertIn("cargo:rustc-env=ENACT_AGENT_BUILD=", text)
+        self.assertIn('std::env::var("ENACT_AGENT_BUILD").unwrap_or_default()', text)
+        self.assertIn("cargo:rerun-if-env-changed=ENACT_AGENT_BUILD", text)
 
 
 class ToolSearchScoringProjectionTests(unittest.TestCase):

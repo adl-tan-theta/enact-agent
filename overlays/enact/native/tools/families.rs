@@ -535,9 +535,9 @@ pub fn canonical_or_self(name: &str) -> &str {
 /// The family → actions contract, for a platform that must learn the
 /// vocabulary rather than guess it.
 ///
-/// The actions come from the same [`family_actions`] derivation that builds
-/// the advertised `action` enum, so the contract and the tool schema cannot
-/// disagree: one table decides both.
+/// The actions come from the same derivation that builds the advertised
+/// `action` enum, so the contract and the tool schema cannot disagree: one
+/// table decides both.
 ///
 /// `deprecated_members` lists the legacy names the family replaces. It is
 /// populated while the legacy names still work, so a consumer can admit them
