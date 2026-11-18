@@ -1,13 +1,24 @@
 //! Architecture gate for Quality Gate and Advisory Windows Tests runner selection.
 //!
-//! The compile-heavy jobs name their Blacksmith runner label directly instead
-//! of reading it from a `fmt` output. `runs-on` resolves before a job is
-//! created, so reading it from another job forced every compile job to wait for
-//! a GitHub-hosted runner to pick up the formatting check first. Writing the
+//! The compile-heavy jobs name their runner label directly instead of reading
+//! it from a `fmt` output. `runs-on` resolves before a job is created, so
+//! reading it from another job forced every compile job to wait for a
+//! GitHub-hosted runner to pick up the formatting check first. Writing the
 //! constant once per job is what removes that wait, and this gate is what keeps
 //! the copies honest: a stray label sends one job to a different runner class,
 //! and a stray cache-provider input sends it to a cache the rest of the fleet
 //! never writes.
+//!
+//! This fork runs the whole fleet on GitHub-hosted runners. Upstream pins it to
+//! the Blacksmith fleet, whose labels only resolve where the Blacksmith GitHub
+//! App is installed on an organisation. This fork lives under a user account,
+//! which has no organisation level to inherit an app installation from, so
+//! every label of that form had no runner behind it. A label with no runner
+//! does not fail — it waits forever. The Quality Gate therefore created zero
+//! jobs in this fork and reported `pending` indefinitely, which is how three
+//! real lint failures stayed invisible until they were found by running the
+//! gate's jobs locally. The inventory below is what keeps that class of
+//! mistake reviewable in one place.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -16,23 +27,49 @@ use std::path::Path;
 
 use regex::Regex;
 
-/// The one runner label the compile-heavy fleet may use. Moving the fleet means
-/// changing this constant and every job below in the same reviewed commit.
-const RUNNER_LABEL: &str = "blacksmith-8vcpu-ubuntu-2404";
+/// The one runner label the fleet may use. Moving the fleet means changing this
+/// constant and every job below in the same reviewed commit.
+///
+/// This fork runs on GitHub-hosted runners. Upstream pins the fleet to
+/// Blacksmith's `blacksmith-8vcpu-ubuntu-2404`, a label that only resolves
+/// where the Blacksmith GitHub App is installed on an organisation. This fork
+/// lives under a user account with no organisation level, so that label had no
+/// runner behind it and the Quality Gate created zero jobs, forever, without
+/// failing. `ubuntu-24.04` is the GitHub-hosted image with the same Ubuntu
+/// version upstream's fleet compiled on.
+const RUNNER_LABEL: &str = "ubuntu-24.04";
 
-/// The runner label for housekeeping jobs: formatting, change detection,
-/// repository guards, docs and policy gates, the Nix checks, the container
-/// smoke, the Windows-test selector, and the required-gate aggregator. None of
-/// them needs 8 vCPUs, but all of them were stranded on `ubuntu-latest` during
-/// the 2026-09-14 hosted-runner assignment outage while the Blacksmith fleet
-/// ran untouched, so the whole required gate stalled on jobs whose combined
-/// work is minutes. Hosting them on Blacksmith removes GitHub's hosted pool
-/// from the required gate's critical path entirely.
-const HOUSEKEEPING_LABEL: &str = "blacksmith-4vcpu-ubuntu-2404";
-
-/// Every housekeeping job in the two workflows on the Blacksmith 4-vCPU class.
+/// Every job in the two workflows that runs on the fleet label.
+///
+/// Upstream splits the fleet in two classes — Blacksmith 8-vCPU for the
+/// compile-heavy jobs, 4-vCPU for the housekeeping jobs — so a single label
+/// cannot carry two mutually exclusive inventories. In this fork both classes
+/// are the same GitHub-hosted image, so there is one label and one inventory.
+/// The compile/housekeeping *roles* are still listed separately below,
+/// because the roles are what the reviewer is checking: the compile jobs are
+/// the ones whose runner size matters, and the housekeeping jobs are the ones
+/// whose work is minutes.
+///
 /// Workflow-qualified IDs keep same-named jobs in different workflows distinct.
-const HOUSEKEEPING_JOBS: [&str; 17] = [
+const FLEET_JOBS: [&str; 32] = [
+    // Compile-heavy: these need the machine.
+    "ci.yml/lint",
+    "ci.yml/build",
+    "ci.yml/check",
+    "ci.yml/check-plugin-backends",
+    "ci.yml/msrv",
+    "ci.yml/check-32bit",
+    "ci.yml/bench",
+    "ci.yml/test",
+    "ci.yml/test-channel-features",
+    "ci.yml/test-tool-features",
+    "ci.yml/test-cli-only",
+    "ci.yml/memory-postgres-test",
+    "ci.yml/parallel-runtime-test",
+    "ci.yml/installer-drift",
+    // Housekeeping: formatting, change detection, repository guards, docs and
+    // policy gates, the Nix checks, the container smoke, the Windows-test
+    // selector, and the required-gate aggregator.
     "ci.yml/fmt",
     "ci.yml/crates-preflight-changes",
     "ci.yml/master-debounce",
@@ -50,6 +87,9 @@ const HOUSEKEEPING_JOBS: [&str; 17] = [
     "ci.yml/security",
     "ci.yml/web-permission-tests",
     "windows-tests.yml/windows-test-scope",
+    // A reusable-workflow caller: it has no `runs-on` of its own and hands the
+    // label to the called workflow.
+    "ci.yml/crates-preflight",
 ];
 
 /// Jobs that stay on GitHub-hosted `ubuntu-latest` because they depend on the
@@ -58,11 +98,16 @@ const HOUSEKEEPING_JOBS: [&str; 17] = [
 /// security coverage. Adding a job here requires a reason of that kind, not
 /// convenience: during a hosted outage, every entry in this list is a check
 /// that cannot run.
+///
+/// This fork's whole fleet is GitHub-hosted, so this allowlist is the
+/// exception list rather than the rule: `ubuntu-latest` is the hosted label
+/// and `ubuntu-24.04` is the fleet label, and a job may only sit on the
+/// former for the Landlock reason above.
 const HOSTED_LINUX_JOBS: [&str; 1] = ["test-landlock"];
 
-/// Every job that compiles the workspace on the Blacksmith fleet. A new compile
-/// job must be added here, which is the point: the list is the inventory this
-/// gate checks the workflow against.
+/// Every job that compiles the workspace. A new compile job must be added
+/// here, which is the point: the list is the inventory this gate checks the
+/// workflow against.
 const COMPILE_JOBS: [&str; 14] = [
     "lint",
     "build",
@@ -85,14 +130,15 @@ const COMPILE_JOBS: [&str; 14] = [
 /// apart from COMPILE_JOBS but still count toward the fleet inventory.
 const REUSABLE_COMPILE_JOBS: [&str; 1] = ["crates-preflight"];
 
-/// `use-blacksmith` inputs the rust-cache composite may receive. The matrix
-/// expression belongs to `build`, whose macOS leg stays on the GitHub-hosted
-/// cache; `'false'` also belongs to the separate Windows jobs and the web job.
-const ALLOWED_CACHE_INPUTS: [&str; 3] = [
-    "'true'",
-    "'false'",
-    "${{ matrix.target == 'x86_64-unknown-linux-gnu' }}",
-];
+/// `use-blacksmith` inputs the rust-cache composite may receive. The composite
+/// treats anything other than `'true'` as "use Swatinem/rust-cache", so a
+/// GitHub-hosted job must pass `'false'`.
+///
+/// This fork has no Blacksmith app, so no job may pass `'true'`: the
+/// Blacksmith cache backend needs the local sticky disk that only a
+/// Blacksmith runner provides, and a hosted runner has none. A job that
+/// passed `'true'` would silently restore no cache at all.
+const ALLOWED_CACHE_INPUTS: [&str; 1] = ["'false'"];
 
 fn ci_workflow() -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -188,7 +234,7 @@ fn compile_jobs_pin_the_runner_label_instead_of_reading_it_from_fmt() {
 }
 
 #[test]
-fn only_the_declared_compile_jobs_claim_the_blacksmith_fleet() {
+fn only_the_declared_fleet_jobs_claim_the_fleet_label() {
     let blocks = runner_workflow_jobs();
 
     let claiming: BTreeSet<String> = blocks
@@ -196,17 +242,38 @@ fn only_the_declared_compile_jobs_claim_the_blacksmith_fleet() {
         .filter(|(_, block)| block.contains(RUNNER_LABEL))
         .map(|(name, _)| name.clone())
         .collect();
-    let declared: BTreeSet<String> = COMPILE_JOBS
-        .into_iter()
-        .chain(REUSABLE_COMPILE_JOBS)
-        .map(|name| format!("ci.yml/{name}"))
-        .collect();
+    let declared: BTreeSet<String> = FLEET_JOBS.into_iter().map(String::from).collect();
 
     assert_eq!(
         claiming, declared,
-        "every job using {RUNNER_LABEL} must be listed in COMPILE_JOBS or \
-         REUSABLE_COMPILE_JOBS, so the fleet inventory stays reviewable in one place"
+        "every job using {RUNNER_LABEL} must be listed in FLEET_JOBS, so the fleet \
+         inventory stays reviewable in one place. A job that is added to the \
+         workflow without being listed here would otherwise reach the runner \
+         unreviewed — and a job that leaves the inventory would silently stop \
+         claiming the fleet label."
     );
+}
+
+#[test]
+fn the_fleet_inventory_covers_every_compile_and_reusable_job() {
+    // The compile fleet and the reusable-workflow jobs are the ones whose
+    // runner class decides whether a merge is safe. They must all be in the
+    // single fleet inventory, and the reusable ones have no `runs-on` of their
+    // own — they hand the label to the called workflow instead.
+    let fleet: BTreeSet<&str> = FLEET_JOBS.into_iter().collect();
+
+    for name in COMPILE_JOBS {
+        assert!(
+            fleet.contains(&format!("ci.yml/{name}").as_str()),
+            "the compile job {name} must be in FLEET_JOBS"
+        );
+    }
+    for name in REUSABLE_COMPILE_JOBS {
+        assert!(
+            fleet.contains(&format!("ci.yml/{name}").as_str()),
+            "the reusable compile job {name} must be in FLEET_JOBS"
+        );
+    }
 }
 
 #[test]
@@ -214,7 +281,13 @@ fn rust_cache_callers_pass_a_reviewed_provider_input() {
     let workflow = ci_workflow();
 
     for line in workflow.lines() {
-        let Some((_, value)) = line.trim_start().split_once("use-blacksmith: ") else {
+        let trimmed = line.trim_start();
+        // A comment may mention the input by name; only a real `with:` entry
+        // sets the provider.
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((_, value)) = trimmed.split_once("use-blacksmith: ") else {
             continue;
         };
         assert!(
@@ -233,7 +306,7 @@ fn the_required_gate_carries_no_windows_runner() {
     // separate workflow and stays where it is.
     let blocks = runner_workflow_jobs();
     let windows_label =
-        Regex::new(r"blacksmith-[a-z0-9-]*windows-[a-z0-9-]+").expect("valid runner-label pattern");
+        Regex::new(r"(?m)^\s*(?:runs-on|os):.*windows").expect("valid runner-label pattern");
     let claiming: BTreeSet<&str> = blocks
         .iter()
         .filter(|(name, _)| name.starts_with("ci.yml/"))
@@ -267,36 +340,56 @@ fn the_required_gate_carries_no_windows_runner() {
 }
 
 #[test]
-fn housekeeping_jobs_pin_the_four_vcpu_label() {
+fn every_fleet_job_pins_the_fleet_label() {
     let blocks = runner_workflow_jobs();
 
-    for name in HOUSEKEEPING_JOBS {
+    for name in FLEET_JOBS {
         let block = blocks
             .get(name)
             .unwrap_or_else(|| panic!("missing workflow job {name}"));
         assert!(
-            block.contains(&format!("    runs-on: {HOUSEKEEPING_LABEL}\n")),
-            "{name} must run on {HOUSEKEEPING_LABEL}"
+            block.contains(RUNNER_LABEL),
+            "{name} must run on {RUNNER_LABEL}"
         );
     }
 }
 
 #[test]
-fn only_the_declared_housekeeping_jobs_claim_the_four_vcpu_class() {
+fn no_job_names_a_runner_label_that_has_no_runner_behind_it() {
+    // A `runs-on` label with no runner behind it does not fail: the job waits
+    // forever. That is how this fork's Quality Gate created zero jobs on every
+    // push and reported `pending` indefinitely, which hid three real lint
+    // failures. A provider-specific label is the trap: it only resolves where
+    // that provider's GitHub App is installed on an organisation, and this fork
+    // lives under a user account that has no organisation level to inherit an
+    // installation from.
     let blocks = runner_workflow_jobs();
 
-    let claiming: BTreeSet<&str> = blocks
-        .iter()
-        .filter(|(_, block)| block.contains(HOUSEKEEPING_LABEL))
-        .map(|(name, _)| name.as_str())
-        .collect();
-    let declared: BTreeSet<&str> = HOUSEKEEPING_JOBS.into_iter().collect();
-
-    assert_eq!(
-        claiming, declared,
-        "every job using {HOUSEKEEPING_LABEL} must be listed in \
-         HOUSEKEEPING_JOBS, so this inventory stays reviewable in one place"
-    );
+    for (name, block) in &blocks {
+        for line in block.lines() {
+            let trimmed = line.trim();
+            let Some(value) = trimmed
+                .strip_prefix("runs-on: ")
+                .or_else(|| trimmed.strip_prefix("- os: "))
+                .or_else(|| trimmed.strip_prefix("runner: "))
+            else {
+                continue;
+            };
+            let value = value.trim();
+            if value.starts_with("${{") {
+                // A matrix expression: the concrete labels are checked
+                // separately by the inventory tests above.
+                continue;
+            }
+            assert!(
+                !value.starts_with("blacksmith-"),
+                "{name} names the runner label {value:?}, which only resolves where \
+                 the Blacksmith GitHub App is installed on an organisation. This \
+                 fork has no such installation, so the job would queue forever \
+                 without failing."
+            );
+        }
+    }
 }
 
 #[test]
