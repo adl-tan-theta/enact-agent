@@ -2210,75 +2210,6 @@ def install_enact_hook_wit(source):
         shutil.copy2(overlay_wit, target_wit)
 
 
-def project_enact_hook_wit_input_inventory(source):
-    """Add the fork's hook interface to the namespace test's input inventory.
-
-    The `late_tool_search` tests bind themselves to the exact set of source
-    inputs the fixture was built from: the receipt lists them, and the test
-    asserts that the list is exactly `expected_inputs`. That is what stops a
-    stale or substituted fixture from being accepted.
-
-    The fork installs `wit/v0/hook.wit` for its plugin-hook capability, so the
-    prepared tree carries one more WIT interface than upstream's inventory
-    names. Without this projection the prepared tree has an input the
-    inventory does not list, the length assertion fails, and all twenty-three
-    `late_tool_search` tests fail before they test anything.
-
-    The name is anchored so upstream drift is a loud error rather than a
-    silent mismatch.
-    """
-    tests = source / "crates/zeroclaw-runtime/src/tools/r5_namespace_tests.rs"
-    entry = '        "wit/v0/hook.wit",\n'
-    # Applying this twice would list the hook interface twice, and the
-    # length assertion in the test rejects a receipt with a duplicated entry
-    # just as surely as it rejects a missing one. The anchor below still
-    # matches after the first application, so the guard is explicit.
-    if entry in tests.read_text():
-        raise RuntimeError(
-            "Upstream overlay drift: the hook interface is already listed in "
-            f"{tests}"
-        )
-    old = '        "wit/v0/README.md",\n        "wit/v0/channel.wit",\n'
-    new = '        "wit/v0/README.md",\n        "wit/v0/channel.wit",\n' + entry
-    replace_required(tests, old, new)
-
-
-def project_enact_namespace_case_deadline(source):
-    """Give the namespace cases room to finish on this fork's hosted runners.
-
-    The `late_tool_search` cases drive a real MCP guest over a real WIT
-    boundary and wait for a cooperative handshake. Upstream gives each case
-    45 seconds, measured on an 8-vCPU Blacksmith runner.
-
-    This fork runs the same job on GitHub-hosted `ubuntu-24.04` -- 4 vCPU,
-    shared with the rest of the gate's fleet -- so the handshake needs more
-    wall clock. Run 44317293992 measured it at the limit: 63 of the 66 cases
-    passed and the three that spawn an MCP server with a skill pipeline
-    failed with "late ToolSearch cooperative case deadline expired".
-
-    The same selection passes locally in 93 seconds for all 66, so the
-    behaviour is correct and only the budget was too small for the runner.
-    The deadline is raised rather than the case being weakened: it still
-    fails a case that genuinely hangs, just with enough room for a loaded
-    machine to reach the handshake.
-
-    The duration is anchored so upstream drift is a loud error rather than a
-    silent mismatch.
-    """
-    tests = source / "crates/zeroclaw-runtime/src/tools/r5_namespace_tests.rs"
-    old = """        tokio::time::timeout(
-            std::time::Duration::from_secs(45),
-            std::panic::AssertUnwindSafe(body_future).catch_unwind(),
-        )
-"""
-    new = """        tokio::time::timeout(
-            std::time::Duration::from_secs(180),
-            std::panic::AssertUnwindSafe(body_future).catch_unwind(),
-        )
-"""
-    replace_required(tests, old, new)
-
-
 def manifest():
     brand = json.loads((ROOT / "overlays/enact/brand.json").read_text())
     if not re.fullmatch(r"[a-z][a-z0-9-]*", brand["command"]):
@@ -6404,56 +6335,6 @@ def project_enact_approval_argument_tests(source):
     )
 
 
-def project_enact_bedrock_imds_opt_out(source):
-    """Let the Bedrock IMDS client honour `AWS_EC2_METADATA_DISABLED`.
-
-    The AWS SDKs read `AWS_EC2_METADATA_DISABLED` and skip the instance
-    metadata service when it is set. This provider does not use the SDK for
-    that step: it has its own client for the metadata address, so the flag
-    does nothing for it.
-
-    That matters because the metadata address is not exclusively AWS's. On a
-    GitHub-hosted runner -- an Azure VM -- the address answers, and it
-    answers with something that is not the AWS metadata document. The
-    provider then fails on the *shape* of the response rather than on the
-    missing credential, which is a different failure than the one the
-    credential path is supposed to produce.
-
-    The `bedrock::tests::chat_fails_without_credentials` test asserts that a
-    request with no credentials fails on the missing credential. On a
-    machine with no metadata service, that is what happens and the test
-    passes. On a hosted runner it did not, and run 44327290873 failed with
-    "Expected missing-credentials style error, got: error decoding response
-    body".
-
-    Making the client's own flag work restores the behaviour every other
-    machine has, and is what the flag is documented to mean. The check is
-    anchored so upstream drift is a loud error rather than a silent
-    mismatch.
-    """
-    bedrock = source / "crates/zeroclaw-providers/src/bedrock.rs"
-    old = """    async fn from_imds() -> anyhow::Result<Self> {
-        let client = reqwest::Client::builder()
-"""
-    new = """    async fn from_imds() -> anyhow::Result<Self> {
-        // The AWS SDKs honour this flag, and the metadata address is not
-        // exclusively AWS's: a hosted runner answers it with something that
-        // is not an AWS metadata document. Skipping the service keeps the
-        // failure on the missing credential, which is what the credential
-        // path is supposed to report.
-        if std::env::var("AWS_EC2_METADATA_DISABLED")
-            .map(|value| !matches!(value.trim(), "" | "0" | "false" | "FALSE" | "False"))
-            .unwrap_or(false)
-        {
-            anyhow::bail!(
-                "EC2 instance metadata access is disabled, so no instance credentials are available"
-            );
-        }
-        let client = reqwest::Client::builder()
-"""
-    replace_required(bedrock, old, new)
-
-
 def project_enact_provider_proxy_test_isolation(source):
     """Keep local OpenAI HTTP tests isolated from process-global proxy state."""
     openai = source / "crates/zeroclaw-providers/src/openai.rs"
@@ -7499,8 +7380,6 @@ def project_enact_plugin_hooks(source):
 
     # The namespace test binds itself to the fixture's input inventory, so
     # the hook interface has to be listed there too.
-    project_enact_hook_wit_input_inventory(source)
-    project_enact_namespace_case_deadline(source)
 
 def project_enact_builtin_selection_fixture(source):
     """Keep the builtin-selection fixture in step with the shipped registry.
@@ -7933,7 +7812,6 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
     project_enact_memory_free_parent_scope(SOURCE)
     project_enact_relay_dial_test_seam(SOURCE)
     project_enact_provider_proxy_test_isolation(SOURCE)
-    project_enact_bedrock_imds_opt_out(SOURCE)
     project_enact_coordination(SOURCE)
     project_enact_turn_control(SOURCE)
     project_enact_upstream_clippy_fixes(SOURCE)

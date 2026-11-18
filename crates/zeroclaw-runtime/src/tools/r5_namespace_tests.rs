@@ -404,6 +404,7 @@ fn late_inputs() -> (Vec<u8>, Vec<u8>, LateValue) {
         "crates/zeroclaw-plugins/tests/fixtures/tool-fixture/src/lib.rs",
         "wit/v0/README.md",
         "wit/v0/channel.wit",
+        "wit/v0/hook.wit",
         "wit/v0/config.wit",
         "wit/v0/inbound.wit",
         "wit/v0/logging.wit",
@@ -523,7 +524,7 @@ where
         // Heap-pin the nested case future before timeout and panic polling layers.
         let body_future = Box::pin(async { body(run.clone()).await });
         tokio::time::timeout(
-            std::time::Duration::from_secs(45),
+            std::time::Duration::from_secs(180),
             std::panic::AssertUnwindSafe(body_future).catch_unwind(),
         )
         .await

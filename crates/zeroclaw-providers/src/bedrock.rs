@@ -210,6 +210,20 @@ impl AwsCredentials {
 
     /// Fetch credentials from EC2 IMDSv2 instance metadata service.
     async fn from_imds() -> anyhow::Result<Self> {
+        // The AWS SDKs honour this flag, and the metadata address is not
+        // exclusively AWS's: a GitHub-hosted runner is an Azure VM where the
+        // address answers with something that is not an AWS metadata
+        // document. Skipping the service keeps the failure on the missing
+        // credential, which is what the credential path is supposed to
+        // report.
+        if std::env::var("AWS_EC2_METADATA_DISABLED")
+            .map(|value| !matches!(value.trim(), "" | "0" | "false" | "FALSE" | "False"))
+            .unwrap_or(false)
+        {
+            anyhow::bail!(
+                "EC2 instance metadata access is disabled, so no instance credentials are available"
+            );
+        }
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(3))
             .build()?;
