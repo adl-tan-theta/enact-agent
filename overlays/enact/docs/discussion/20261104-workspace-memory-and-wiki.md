@@ -2,8 +2,8 @@
 
 Status: discussion notes and a design proposal, not a decision or a contract.
 Recorded 2026-11-04. Companion to
-[saas-agent-platform.md](saas-agent-platform.md) and
-[event-driven-agents.md](event-driven-agents.md). Upstream base examined:
+[saas-agent-platform.md](20261103-saas-agent-platform.md) and
+[event-driven-agents.md](20261103-event-driven-agents.md). Upstream base examined:
 `1c1cd118` (ZeroClaw 0.8.7).
 
 This file does not relax `overlays/enact/AGENTS.md`. Nothing here has been built,

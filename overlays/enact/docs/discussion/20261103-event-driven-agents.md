@@ -1,7 +1,7 @@
 # Event-driven agents: webhook, MQTT, AMQP and SOPs
 
 Status: discussion notes, not a decision or a contract. Recorded 2026-11-03.
-Companion to [saas-agent-platform.md](saas-agent-platform.md). Upstream base
+Companion to [saas-agent-platform.md](20261103-saas-agent-platform.md). Upstream base
 examined: `1c1cd118` (ZeroClaw 0.8.7).
 
 This file does not relax `overlays/enact/AGENTS.md`. Nothing here has been built,
