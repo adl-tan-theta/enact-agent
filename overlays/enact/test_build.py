@@ -162,6 +162,30 @@ class ExcludedMemoryProjectionTests(unittest.TestCase):
         self.assertIn("exclude_memory: memory_free", delegate)
 
 
+class BedrockImdsProjectionTests(unittest.TestCase):
+    """The Bedrock client has to honour the standard opt-out flag.
+
+    The provider reads the instance metadata service as its last credential
+    source. That address answers on a hosted runner, with something that is
+    not an AWS metadata document, so the credential path fails on the shape
+    of the response instead of on the missing credential.
+    """
+
+    def test_metadata_client_honours_the_opt_out_flag(self):
+        bedrock = build.SOURCE / "crates/zeroclaw-providers/src/bedrock.rs"
+        text = bedrock.read_text()
+        self.assertIn("AWS_EC2_METADATA_DISABLED", text)
+        # The check has to come before the client is built, or the service is
+        # contacted before the flag is read.
+        flag = text.index("AWS_EC2_METADATA_DISABLED")
+        first_request = text.index("169.254.169.254")
+        self.assertLess(flag, first_request)
+
+    def test_projection_refuses_to_run_twice(self):
+        with self.assertRaises(RuntimeError):
+            build.project_enact_bedrock_imds_opt_out(build.SOURCE)
+
+
 class NamespaceCaseProjectionTests(unittest.TestCase):
     """The namespace cases must stay bound to this fork's tree and runner.
 

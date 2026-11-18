@@ -6404,6 +6404,56 @@ def project_enact_approval_argument_tests(source):
     )
 
 
+def project_enact_bedrock_imds_opt_out(source):
+    """Let the Bedrock IMDS client honour `AWS_EC2_METADATA_DISABLED`.
+
+    The AWS SDKs read `AWS_EC2_METADATA_DISABLED` and skip the instance
+    metadata service when it is set. This provider does not use the SDK for
+    that step: it has its own client for the metadata address, so the flag
+    does nothing for it.
+
+    That matters because the metadata address is not exclusively AWS's. On a
+    GitHub-hosted runner -- an Azure VM -- the address answers, and it
+    answers with something that is not the AWS metadata document. The
+    provider then fails on the *shape* of the response rather than on the
+    missing credential, which is a different failure than the one the
+    credential path is supposed to produce.
+
+    The `bedrock::tests::chat_fails_without_credentials` test asserts that a
+    request with no credentials fails on the missing credential. On a
+    machine with no metadata service, that is what happens and the test
+    passes. On a hosted runner it did not, and run 44327290873 failed with
+    "Expected missing-credentials style error, got: error decoding response
+    body".
+
+    Making the client's own flag work restores the behaviour every other
+    machine has, and is what the flag is documented to mean. The check is
+    anchored so upstream drift is a loud error rather than a silent
+    mismatch.
+    """
+    bedrock = source / "crates/zeroclaw-providers/src/bedrock.rs"
+    old = """    async fn from_imds() -> anyhow::Result<Self> {
+        let client = reqwest::Client::builder()
+"""
+    new = """    async fn from_imds() -> anyhow::Result<Self> {
+        // The AWS SDKs honour this flag, and the metadata address is not
+        // exclusively AWS's: a hosted runner answers it with something that
+        // is not an AWS metadata document. Skipping the service keeps the
+        // failure on the missing credential, which is what the credential
+        // path is supposed to report.
+        if std::env::var("AWS_EC2_METADATA_DISABLED")
+            .map(|value| !matches!(value.trim(), "" | "0" | "false" | "FALSE" | "False"))
+            .unwrap_or(false)
+        {
+            anyhow::bail!(
+                "EC2 instance metadata access is disabled, so no instance credentials are available"
+            );
+        }
+        let client = reqwest::Client::builder()
+"""
+    replace_required(bedrock, old, new)
+
+
 def project_enact_provider_proxy_test_isolation(source):
     """Keep local OpenAI HTTP tests isolated from process-global proxy state."""
     openai = source / "crates/zeroclaw-providers/src/openai.rs"
@@ -7883,6 +7933,7 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
     project_enact_memory_free_parent_scope(SOURCE)
     project_enact_relay_dial_test_seam(SOURCE)
     project_enact_provider_proxy_test_isolation(SOURCE)
+    project_enact_bedrock_imds_opt_out(SOURCE)
     project_enact_coordination(SOURCE)
     project_enact_turn_control(SOURCE)
     project_enact_upstream_clippy_fixes(SOURCE)
