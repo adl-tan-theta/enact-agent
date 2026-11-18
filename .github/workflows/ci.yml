@@ -401,7 +401,30 @@ jobs:
             target: x86_64-unknown-linux-gnu
             cmd: build
             label: Build
+          # The Apple target is checked on two runners from different pools.
+          #
+          # `macos-15` is an arm64 host, and arm64 macOS capacity on
+          # GitHub-hosted runners is scarce: run 44335338973 recorded "The job
+          # # was not acquired by Runner of type hosted even after multiple
+          # attempts" for this leg, and the leg it cancelled took the whole
+          # `build` job -- and with it the gate -- down. The leg succeeds
+          # about half the time, so this is capacity, not the code.
+          #
+          # `macos-15-intel` is the Intel pool: a different pool, with its own
+          # capacity. The leg is a cross-compile *check* of
+          # `aarch64-apple-darwin`, so it does not need an arm64 host -- the
+          # target's standard library comes from the toolchain step, not
+          # from the runner. Whichever pool has capacity serves the check.
+          #
+          # The other arm64 images are the same pool as `macos-15` -- the
+          # retired macOS 14 images are gone, and `macos-26` and `xcode-27`
+          # share the arm64 capacity -- so the Intel pool is the only
+          # distinct one left.
           - os: macos-15
+            target: aarch64-apple-darwin
+            cmd: check
+            label: Check
+          - os: macos-15-intel
             target: aarch64-apple-darwin
             cmd: check
             label: Check
@@ -1649,7 +1672,22 @@ jobs:
     needs: [parallel-runtime-test-changes]
     if: ${{ !cancelled() && needs.parallel-runtime-test-changes.result == 'success' && needs.parallel-runtime-test-changes.outputs.run == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # Upstream sized this ceiling on a Blacksmith `8vcpu` runner. This fork
+    # runs it on GitHub-hosted `ubuntu-24.04` -- 4 vCPU -- because
+    # `adl-tan-theta` is a user account with no organisation to inherit a
+    # Blacksmith installation from.
+    #
+    # The job's own test time is not the problem: the six runs took about
+    # twelve minutes in run 44335338973, and every one of them passed. The
+    # ceiling was consumed by compilation -- each run rebuilds the crate
+    # before it can test it, and the rebuild is what halves when the vCPU
+    # count halves.
+    #
+    # 45 gives the compile the room it needs on the runner this fork
+    # actually has, with the test runs themselves still finishing well
+    # inside it. The ceiling is a backstop against a hung job, not a
+    # target.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
