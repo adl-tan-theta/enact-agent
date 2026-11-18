@@ -5,16 +5,132 @@ on:
     branches: [master, enact/branding]
   push:
     branches: [master, enact/branding]
+  # Merge queue: GitHub builds a temporary `gh-readonly-queue/master/…` branch
+  # and fires `merge_group`. The required `CI Required Gate` must report on that
+  # branch or queued PRs stall, so the full gate runs here too.
   merge_group:
 
 concurrency:
+  # Merge-queue runs key on the unique queue ref (github.ref →
+  # `refs/heads/gh-readonly-queue/master/pr-N-<sha>`) so speculative entries
+  # never cancel each other; PRs still key on the PR number.
+  #
+  # The `-v2` suffix is not decoration. A workflow run holds its concurrency
+  # group for as long as it is not finished, and a job that waits forever for a
+  # runner that does not exist is never finished. Run 44238797706 -- the first
+  # Quality Gate run on this branch -- left its `CI Required Gate` job queued
+  # on a `blacksmith-4vcpu-ubuntu-2404` label with no Blacksmith installation
+  # behind it, and that one stuck job held this group for every run after it.
+  # Each of those runs waited for the group, created no jobs at all, and
+  # reported `pending` forever, which is what made the gate look like it was
+  # merely slow. Changing the group expression releases the wedge: a new run
+  # gets a new group and starts immediately.
+  #
+  # The lesson is recorded rather than only fixed: the job that waits for a
+  # missing runner must not be the job that holds the gate, and the group must
+  # be versionable so a wedged run can always be escaped.
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-v2
   cancel-in-progress: true
 
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+# ── Runner selection: a checked-in label on each compile-heavy job ──────────
+# The Rust-compiling jobs below (lint, build, check, check-plugin-backends,
+# check-32bit, bench, test, test-channel-features, test-tool-features, test-cli-only, memory-postgres-test, msrv, parallel-runtime-test,
+# installer-drift) and the Linux `build` matrix entry name their runner label
+# directly, so runner selection does not wait for fmt. The build matrix
+# waits only for the push debounce, which is skipped on PR and merge-queue events.
+# The required gate is Mac + Linux only: the Windows legs were removed, so the
+# gate does not spend runner budget on a platform this fork does not ship.
+# `tests/architecture/ci_runner_labels.rs` fails the workspace suite if those
+# labels or their cache-provider inputs drift apart, so moving the fleet stays
+# one reviewed edit even though the constant is written more than once.
+#
+# THIS FORK RUNS ON GITHUB-HOSTED RUNNERS. Upstream pins the compile fleet to
+# the Blacksmith fleet (`blacksmith-4vcpu-ubuntu-2404` /
+# `blacksmith-8vcpu-ubuntu-2404`) and that label only resolves where the
+# Blacksmith GitHub App is installed on an organisation. This fork lives under
+# a *user* account, `adl-tan-theta`, which has no organisation level to
+# inherit an app installation from, so every label of that form had no runner
+# behind it. The symptom was silent and total: run 44261582299 sat at
+# `pending` with zero jobs created, forever, and so did every run before it —
+# the Quality Gate had never produced a single job in this fork, which is why
+# its lint failures went unseen until they were found by running the gate's
+# jobs locally. A label with no runner does not fail; it waits, so the gate
+# looked "running" rather than "broken".
+#
+# The evidence that this was the cause and not account-level runner
+# exhaustion: on the same commit, the Enact native-build workflow ran five
+# GitHub-hosted jobs concurrently to completion, while the Quality Gate
+# created none. The Actions pool was not saturated; the label was wrong.
+# The check suites show the same split -- `github-actions` completing, and the
+# `claude`, `cursor` and `warp-factories` suites sitting `queued` -- so the
+# AI-review apps were never the blocker either.
+#
+# There was a second cause, and it hid the first. The very first Quality Gate
+# run on this branch, 44238797706, did materialise all 38 jobs and ran them to
+# completion -- except `CI Required Gate`, which waited on the same missing
+# Blacksmith label. A job waiting for a runner that does not exist never
+# finishes, and an unfinished run holds its concurrency group. Every later run
+# queued behind it, created zero jobs, and reported `pending` indefinitely. The
+# gate looked like it was slow, not broken. The group expression is now
+# versioned so a wedged run can always be escaped; the note on the
+# `concurrency:` block below records why that matters.
+#
+# The labels are therefore `ubuntu-24.04`, the GitHub-hosted image matching
+# the Ubuntu version upstream compiled on, so the toolchain and the crate
+# features are the same ones upstream's fleet used. Every rust-cache call
+# switches to `use-blacksmith: 'false'`, which selects the Swatinem/rust-cache
+# provider: the composite already implements that fallback, so the cache
+# keeps working without Blacksmith's sticky disk.
+#
+# WHY NOT read the label from a `fmt` output: `runs-on` resolves before a job is
+# created, so every compile job had to declare `needs: [fmt]` and wait for a
+# GitHub-hosted runner to pick up a 24-second formatting check first. On run
+# 34948990064 that put an 8.6-minute hosted queue wait in front of the whole
+# Blacksmith fan-out. `CI Required Gate` still needs `fmt`, so a formatting
+# error still blocks merge; it no longer delays compilation.
+#
+# WHY NOT the former `vars.CI_USE_BLACKSMITH` toggle: `vars` is unreadable in
+# fork-origin `pull_request` runs, and 90% of this repo's PRs are fork-origin.
+# The fail-closed expression therefore sent essentially every contributor PR to
+# ubuntu-latest, and handed the same unresolved value to the rust-cache
+# composite, which fell back to a GitHub Actions cache that master — now
+# building on Blacksmith — no longer writes. Fork PRs logged "No cache found."
+# while master logged "full match: true". Canary run 33809504331 confirmed both
+# halves directly: on a fork PR it printed CI_USE_BLACKSMITH='' yet still ran on
+# a blacksmith-8vcpu runner, so Blacksmith serves fork PRs and only the
+# expression was blocking. See #7108.
+#
+# UNCHANGED SAFETY PROPERTY: every rust-cache call still passes
+# `save-if: github.ref == 'refs/heads/master'`, so fork PRs remain cache READERS
+# only and cannot poison the cache master seeds.
+#
+# PRECONDITION, for a fork that does have the Blacksmith app: Blacksmith
+# triggerer SSH must remain DISABLED (Blacksmith → Settings → Features → SSH
+# Access) so a green required check attests only the reviewed commit; the
+# endpoint line in job logs is image-default with no authorized keys installed
+# and is not an exposure. This fork has no Blacksmith app, so that condition
+# does not apply here.
+
 jobs:
+  # ── Master-push debounce ─────────────────────────────────────────────────
+  # Master pushes arrive in bursts (median gap ~10 min, many under 5), and the
+  # run-level `cancel-in-progress` cancels each superseded push only after its
+  # compile fleet has started: over one week, 33+ master runs were cancelled
+  # mid-compile. On push events the compile-heavy jobs wait here first, so a
+  # push that is superseded within the window is cancelled while this job is
+  # sleeping, before any compile begins. On pull_request and merge_group this
+  # job is skipped: a skipped job resolves without a runner, so PR and queue
+  # latency are unchanged. Gated jobs use
+  # `!cancelled() && needs.master-debounce.result != 'failure'` so a skip lets
+  # them run; `gate` needs this job so a debounce failure cannot turn skipped
+  # compile jobs into a green gate.
   master-debounce:
     name: Debounce master push
     if: github.event_name == 'push'
@@ -34,6 +150,7 @@ jobs:
   # GitHub-hosted or compile jobs; they spend runner minutes before the gate
   # reports red. In exchange, a slow `fmt` queue no longer delays their
   # scheduling during a GitHub-hosted runner shortage.
+
   fmt:
     name: Format
     runs-on: ubuntu-24.04
@@ -46,6 +163,7 @@ jobs:
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
+
   history-guard:
     name: Common Ancestor
     runs-on: ubuntu-24.04
@@ -157,6 +275,7 @@ jobs:
 
       - name: Test docs version selector and root 404 redirect
         run: node --test scripts/docs/version_selector_test.mjs scripts/docs/root_404_test.mjs
+
   relay-container-smoke-changes:
     name: Detect Relay Container Smoke changes
     # Ordering note: this detector only runs `git diff` and never compiles, so it
@@ -204,6 +323,7 @@ jobs:
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
           fi
+
   relay-container-smoke:
     name: Relay Container Fresh-Volume Smoke
     needs: [relay-container-smoke-changes]
@@ -226,6 +346,7 @@ jobs:
         run: ZERORELAY_SMOKE_IMAGE=zerorelay:smoke bash scripts/ci/smoke_relay_fresh_volume.sh
 
   # ── Required quality gate ─────────────────────────────────────────────────
+
   lint:
     name: Lint
     needs: [master-debounce]
@@ -277,6 +398,7 @@ jobs:
           bash scripts/ci/container_build_inputs_gate.sh
       - name: act-local artifact compatibility tests
         run: bash scripts/dev/act-local.test.sh
+
   build:
     name: ${{ matrix.label }} ${{ matrix.target }}
     needs: [master-debounce]
@@ -414,6 +536,7 @@ jobs:
         run: mkdir -p web/dist && touch web/dist/.gitkeep
       - name: Check
         run: cargo check --locked ${{ matrix.args }}
+
   check-plugin-backends:
     name: Check (${{ matrix.name }})
     needs: [master-debounce]
@@ -1056,6 +1179,7 @@ jobs:
       - name: Run gateway plugin webhook golden frames
         if: steps.changed.outputs.run == 'true' && matrix.suite == 'gateway'
         run: cargo test --locked -p zeroclaw-gateway --features plugins-wasm --test golden_frames plugin_webhook
+
   msrv:
     name: MSRV (declared floor)
     needs: [installer-drift]
@@ -1100,6 +1224,7 @@ jobs:
           cargo check --locked --workspace --exclude zeroclaw-desktop \
             --no-default-features \
             --features "${{ needs.installer-drift.outputs.all_features }}"
+
   check-32bit:
     name: Check (32-bit)
     needs: [master-debounce]
@@ -1124,6 +1249,7 @@ jobs:
         run: mkdir -p web/dist && touch web/dist/.gitkeep
       - name: Check (32-bit, no default features)
         run: cargo check --locked --target i686-unknown-linux-gnu --no-default-features
+
   bench:
     name: Benchmarks Compile
     needs: [master-debounce]
@@ -1185,6 +1311,7 @@ jobs:
           RUST_CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
 
   # ── Tests ─────────────────────────────────────────────────────────────────
+
   test:
     name: Test
     needs: [master-debounce]
@@ -1400,6 +1527,7 @@ jobs:
         run: |
           cargo build --locked -p zeroclaw --bin zeroclaw --no-default-features --features "${{ steps.features.outputs.list }}"
           bash scripts/ci/cli_only_ratchet.sh run x86_64-unknown-linux-gnu target/debug/zeroclaw
+
   memory-postgres-test:
     name: Test (PostgreSQL Memory)
     needs: [master-debounce]
@@ -1448,6 +1576,7 @@ jobs:
           ZEROCLAW_TEST_POSTGRES_URL: postgres://zeroclaw_test:zeroclaw_test@127.0.0.1:5432/zeroclaw_test
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+
   parallel-runtime-test-changes:
     name: Detect parallel runtime test changes
     needs: [master-debounce]
@@ -1495,6 +1624,7 @@ jobs:
               echo "run=true" >> "$GITHUB_OUTPUT"
               ;;
           esac
+
   parallel-runtime-test:
     name: Parallel Runtime Test
     needs: [parallel-runtime-test-changes]
@@ -1523,6 +1653,7 @@ jobs:
           ZEROCLAW_PARALLEL_TEST_SCOPE: ${{ needs.parallel-runtime-test-changes.outputs.scope }}
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+
   test-landlock:
     name: Test (Landlock)
     needs: [master-debounce]
@@ -1552,6 +1683,7 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
   # ── Security checks ───────────────────────────────────────────────────────
+
   security:
     name: Security
     runs-on: ubuntu-24.04
@@ -1668,6 +1800,7 @@ jobs:
           # config, runtime, and SOP graph crates and is rendered by the xtask generator.
           # Keep this trigger aligned with every source that can change it.
           emit web      "^web/|^crates/zeroclaw-(config|gateway|runtime|sop-graph)/|^xtask/|^Cargo\.(toml|lock)$|^\.nvmrc$|${wf}"
+
   nix-eval:
     name: Nix Module Eval
     needs: [path-changes]
@@ -1696,6 +1829,7 @@ jobs:
         run: python3 scripts/ci/list_git_dep_keys_test.py
       - name: Validate nix/hashes.json matches Cargo.lock git deps
         run: python3 scripts/ci/list_git_dep_keys.py --check-hashes nix/hashes.json
+
   docs-style:
     name: Docs Style
     needs: [path-changes]
@@ -1788,6 +1922,7 @@ jobs:
             exit 1
           fi
           printf 'value=%s\n' "$value" >> "$GITHUB_OUTPUT"
+
   web-permission-tests:
     name: Web Permission Tests
     needs: [path-changes]
@@ -1873,6 +2008,7 @@ jobs:
       stage: preflight
       dry_run: true
       runner: ubuntu-24.04
+
   gate:
     name: CI Required Gate
     if: always()

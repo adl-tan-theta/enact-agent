@@ -299,6 +299,43 @@ fn rust_cache_callers_pass_a_reviewed_provider_input() {
 }
 
 #[test]
+fn the_concurrency_group_is_versioned_so_a_wedged_run_can_be_escaped() {
+    // A workflow run holds its concurrency group until it finishes, and a job
+    // that waits for a runner that does not exist never finishes. Run
+    // 44238797706 left the gate's `CI Required Gate` job queued on a
+    // Blacksmith label with no installation behind it, and that single stuck
+    // job held the group for every run after it: each one queued behind it,
+    // created zero jobs, and reported `pending` forever.
+    //
+    // The group expression therefore carries a version suffix. When a run
+    // wedges, changing the suffix gives the next run a fresh group and it
+    // starts immediately -- without needing to cancel the wedged run, which
+    // the API cannot do for a job that never started.
+    let workflow = ci_workflow();
+
+    let Some((_, after)) = workflow.split_once("\nconcurrency:\n") else {
+        panic!("ci.yml must declare a concurrency group");
+    };
+    let group_line = after
+        .lines()
+        .find(|line| line.trim_start().starts_with("group:"))
+        .expect("the concurrency block must name a group");
+    let group = group_line
+        .trim_start()
+        .trim_start_matches("group:")
+        .trim()
+        .to_string();
+
+    assert!(
+        group.ends_with("-v2"),
+        "the concurrency group {group:?} must carry a version suffix: a run that \
+         wedges on a missing runner holds its group until it is cancelled, and \
+         an API cancel does not work for a job that never started. The version \
+         suffix is the escape hatch."
+    );
+}
+
+#[test]
 fn the_required_gate_carries_no_windows_runner() {
     // The Quality Gate is Mac + Linux only. The Windows legs that used to sit
     // in it were removed so the required gate does not spend its runner
