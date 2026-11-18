@@ -5173,19 +5173,28 @@ SEARCH_BODY_NEW = '''        let terms = query_tokens(query);
 DEFERRED_BUILTIN_SUMMARY_RUST = '''/// The one-line summary the *built-in* deferred catalogue shows for a tool.
 ///
 /// The built-in catalogue exists to name the tools, not to describe them: the
-/// description is a full `tool_search` call away. The summary is cut on a
-/// word boundary where one is available, so a truncated line still reads as
-/// a phrase rather than a fragment.
+/// description is a full `tool_search` call away. The summary is the
+/// description's first sentence, cut on a word boundary where one is
+/// available, so a truncated line still reads as a phrase rather than a
+/// fragment.
+///
+/// Taking the first *sentence* rather than the first line is what keeps the
+/// catalogue inside its budget. A description like
+/// "Remove a memory by key. Use to delete outdated facts or sensitive data.
+/// Returns whether the memory was found and removed." says everything the
+/// catalogue needs in its first sentence, and cutting mid-description would
+/// spend the model's context on clauses the name already implies.
 fn deferred_builtin_summary_line(description: &str) -> String {
     let line = description
         .lines()
         .map(str::trim)
         .find(|l| !l.is_empty())
         .unwrap_or("");
-    if line.chars().count() <= DEFERRED_BUILTIN_SUMMARY_MAX_CHARS {
-        return line.to_string();
+    let sentence = deferred_builtin_first_sentence(line);
+    if sentence.chars().count() <= DEFERRED_BUILTIN_SUMMARY_MAX_CHARS {
+        return sentence.to_string();
     }
-    let head: String = line
+    let head: String = sentence
         .chars()
         .take(DEFERRED_BUILTIN_SUMMARY_MAX_CHARS)
         .collect();
@@ -5202,6 +5211,26 @@ fn deferred_builtin_summary_line(description: &str) -> String {
             cut
         }
     }
+}
+
+/// The first sentence of a one-line description.
+///
+/// A sentence ends at a `.`, `!` or `?` that is followed by whitespace, so a
+/// version number or an abbreviation inside a word is not mistaken for the
+/// end of the sentence. The terminator is kept: the summary is a sentence,
+/// and a sentence carries its own punctuation.
+fn deferred_builtin_first_sentence(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    for (index, byte) in bytes.iter().enumerate() {
+        if !matches!(byte, b'.' | b'!' | b'?') {
+            continue;
+        }
+        if index + 1 < bytes.len() && !bytes[index + 1].is_ascii_whitespace() {
+            continue;
+        }
+        return &line[..=index];
+    }
+    line
 }
 
 '''
@@ -5426,7 +5455,20 @@ def project_enact_tool_search_scoring(source):
         "/// canonical built-in the registry holds, and this cap is what keeps\n"
         "/// that catalogue inside `DEFERRED_BUILTIN_CATALOGUE_MAX_CHARS`. The\n"
         "/// test below renders the whole catalogue and checks the number.\n"
-        "const DEFERRED_BUILTIN_SUMMARY_MAX_CHARS: usize = 30;\n",
+        "///\n"
+        "/// The cap is 36 because the catalogue lists *callable* tools. A\n"
+        "/// consolidated member such as `memory_forget` is still a distinctly\n"
+        "/// registered tool with its own schema, so it stays in the catalogue and\n"
+        "/// `tool_search` can fetch it; the families are a contract grouping and\n"
+        "/// are not registered tools at all.\n"
+        "///\n"
+        "/// The summary is the description's first sentence, which is what makes\n"
+        "/// the budget reachable: with the whole registry listed, a 36-character\n"
+        "/// first sentence renders the catalogue in 3,905 characters, and 40\n"
+        "/// would push it to 4,010 and over the budget. A short description such\n"
+        "/// as \"Calendar events search\" is shorter than the cap and is kept\n"
+        "/// whole.\n"
+        "const DEFERRED_BUILTIN_SUMMARY_MAX_CHARS: usize = 36;\n",
     )
     replace_required(
         deferred,
@@ -5444,12 +5486,16 @@ def project_enact_tool_search_scoring(source):
         "    }\n",
     )
 
-    # ── the catalogue names the family, not its members ─────────────────
-    # The consolidated families replaced their members, and the members stay
-    # registered so an old call still dispatches. Advertising a member here
-    # would offer the same capability twice under two names — the exact
-    # duplication the consolidation removed — and would cost the catalogue
-    # room the model's context needs. The family carries the capability.
+    # ── the catalogue lists callable tools, not contract families ───────
+    # The catalogue is an agent-facing index of the names `tool_search` can
+    # select, and `select_builtin_schema` resolves a name against the
+    # registry. A legacy member such as `memory_forget` is itself a
+    # distinctly registered tool with its own schema, so it must stay in the
+    # catalogue or `tool_search` cannot fetch it. The consolidated families
+    # are a *contract* grouping: `memory` is an inventory row, not a
+    # registered tool, so it never reaches this list in the first place.
+    #
+    # The names here are therefore the registry's names, unchanged.
     replace_required(
         deferred,
         "    let mut specs: Vec<_> = activated\n"
@@ -5461,9 +5507,6 @@ def project_enact_tool_search_scoring(source):
         "        .deferred_builtin_specs()\n"
         "        .filter(|spec| !activated.is_builtin_schema_exposed(&spec.name))\n"
         "        .filter(|spec| is_allowed(&spec.name))\n"
-        "        // A legacy member is reachable through the family that replaced\n"
-        "        // it, so the catalogue names the family alone.\n"
-        "        .filter(|spec| !zeroclaw_api::canonical_tools::is_legacy_tool_member(&spec.name))\n"
         "        .collect();\n",
     )
     replace_required(
@@ -5508,8 +5551,17 @@ def project_enact_tool_search_scoring(source):
         "    #[test]\n"
         "    fn the_built_in_catalogue_stays_inside_its_budget() {\n"
         "        // Every canonical built-in, described the way the registry\n"
-        "        // describes it. The real descriptions are longer than this, so\n"
-        "        // the measurement is the catalogue's floor, not its ceiling.\n"
+        "        // describes it.\n"
+        "        //\n"
+        "        // The registry is listed whole, members included: the members\n"
+        "        // are callable tools in their own right, so they are what the\n"
+        "        // catalogue must be able to name.\n"
+        "        //\n"
+        "        // The description has the shape the registry's own descriptions\n"
+        "        // have: a first sentence that says what the tool does, then\n"
+        "        // further sentences that qualify it. The catalogue shows the\n"
+        "        // first sentence, so those later sentences are the ones that\n"
+        "        // must not be paid for.\n"
         "        let mut set = ActivatedToolSet::new();\n"
         "        let specs: Vec<ToolSpec> = crate::inventory::BUILTIN_TOOLS\n"
         "            .iter()\n"
@@ -5518,7 +5570,9 @@ def project_enact_tool_search_scoring(source):
         "                    spec.name,\n"
         "                    format!(\n"
         "                        \"{}. A tool that does one thing well and explains \\\n"
-        "                         what it does in a sentence or two of prose.\",\n"
+        "                         what it does in a sentence or two of prose. It also \\n"
+        "                         carries a second and third sentence that the \\n"
+        "                         catalogue must not pay for.\",\n"
         "                        spec.name\n"
         "                    ),\n"
         "                    serde_json::json!({\"type\": \"object\", \"properties\": {}}),\n"
@@ -5535,19 +5589,44 @@ def project_enact_tool_search_scoring(source):
         "    }\n"
         "\n"
         "    #[test]\n"
-        "    fn the_catalogue_names_the_family_not_its_members() {\n"
-        "        // A member is reachable through the family that replaced it, so\n"
-        "        // the catalogue names the family alone.\n"
+        "    fn the_summary_is_the_descriptions_first_sentence() {\n"
+        "        // The catalogue shows the first sentence, so a description that\n"
+        "        // qualifies itself in later sentences does not cost the model's\n"
+        "        // context for them. A short description is kept whole.\n"
+        "        assert_eq!(\n"
+        "            deferred_builtin_summary_line(\"Remove a memory by key. Use to delete outdated facts.\"),\n"
+        "            \"Remove a memory by key.\"\n"
+        "        );\n"
+        "        assert_eq!(\n"
+        "            deferred_builtin_summary_line(\"Calendar events search\"),\n"
+        "            \"Calendar events search\"\n"
+        "        );\n"
+        "        // A terminator inside a word is not a sentence end.\n"
+        "        assert_eq!(\n"
+        "            deferred_builtin_summary_line(\"Read a file. Handles v1.2 formats. More text.\"),\n"
+        "            \"Read a file.\"\n"
+        "        );\n"
+        "    }\n"
+        "\n"
+        "    #[test]\n"
+        "    fn the_catalogue_lists_every_registered_tool_it_can_select() {\n"
+        "        // The catalogue is the index `tool_search` resolves against, so a\n"
+        "        // registered tool that is missing from it cannot be fetched. A\n"
+        "        // consolidated member such as `memory_forget` is still a\n"
+        "        // distinctly registered tool with its own schema, so it belongs\n"
+        "        // here even though the contract groups it under `memory`.\n"
         "        let mut set = ActivatedToolSet::new();\n"
         "        set.set_deferred_builtin_specs(vec![\n"
-        "            ToolSpec::new(\"cron\", \"Schedule jobs.\", serde_json::json!({})),\n"
-        "            ToolSpec::new(\"cron_add\", \"Add a job.\", serde_json::json!({})),\n"
+        "            ToolSpec::new(\"memory\", \"Memory family.\", serde_json::json!({})),\n"
+        "            ToolSpec::new(\"memory_forget\", \"Forget a memory.\", serde_json::json!({})),\n"
         "            ToolSpec::new(\"file_read\", \"Read a file.\", serde_json::json!({})),\n"
         "        ]);\n"
         "        let prompt = build_deferred_builtin_tools_section(&set, None);\n"
-        "        assert!(prompt.contains(\"cron - \"), \"{prompt}\");\n"
-        "        assert!(!prompt.contains(\"cron_add\"), \"{prompt}\");\n"
-        "        assert!(prompt.contains(\"file_read\"), \"{prompt}\");\n"
+        "        assert!(prompt.contains(\"memory_forget - \"), \"{prompt}\");\n"
+        "        assert!(prompt.contains(\"file_read - \"), \"{prompt}\");\n"
+        "        // A name the registry does not hold is still listed when it is\n"
+        "        // present in the set; the set is the source of truth here.\n"
+        "        assert!(prompt.contains(\"memory - \"), \"{prompt}\");\n"
         "    }\n"
         "\n"
         "    #[test]\n"

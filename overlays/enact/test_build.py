@@ -369,11 +369,14 @@ class ToolSearchScoringProjectionTests(unittest.TestCase):
         tools_lib = (source / paths[0]).read_text()
         self.assertIn("pub mod tool_search_score;", tools_lib)
         deferred = (source / paths[1]).read_text()
-        self.assertIn("const DEFERRED_BUILTIN_SUMMARY_MAX_CHARS: usize = 30;", deferred)
+        self.assertIn("const DEFERRED_BUILTIN_SUMMARY_MAX_CHARS: usize = 36;", deferred)
         self.assertIn("fn deferred_builtin_summary_line(", deferred)
+        self.assertIn("fn deferred_builtin_first_sentence(", deferred)
         self.assertNotIn("fn deferred_search_score(", deferred)
-        # The catalogue names the family, not the member it replaced.
-        self.assertIn("is_legacy_tool_member(&spec.name)", deferred)
+        # The catalogue lists the registry's callable tools, members included:
+        # a consolidated member is still a registered tool with its own
+        # schema, so `tool_search` must be able to name it.
+        self.assertNotIn("is_legacy_tool_member(&spec.name)", deferred)
         search = (source / paths[2]).read_text()
         self.assertIn("MAX_SEARCH_TOOL_REFERENCES", search)
         self.assertIn("SEARCH_TOKEN_BUDGET", search)
