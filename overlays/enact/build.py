@@ -6293,6 +6293,104 @@ def project_enact_contextual_mcp_family(source):
     )
 
 
+def project_enact_deferred_builtin_surface(source):
+    """Advertise the small tool surface by default, with `tool_search` to recover.
+
+    A canonical family advertises an action enum and nothing else, so the
+    member parameters are not in the advertised schema. The recovery channel
+    for them is `tool_search`, which hands back the complete schema of a
+    member on demand.
+
+    Upstream keeps `deferred_builtin_tools` opt-in and defaults it to false,
+    so an ordinary session advertises every built-in schema eagerly. The fork
+    makes the small surface the default: a turn's prompt carries only the
+    tools the model may actually use, and the rest are browsed on demand.
+
+    The switch stays where the owner put it. The fork's runtime presets are
+    what an operator's agent is bound to - `quickstart` writes
+    `agents.<alias>.runtime_profile` from the preset table - so putting
+    `deferred_builtin_tools = true` on the presets is what turns the small
+    surface on for a real installation.
+
+    The schema default stays `false`. An agent that names no runtime profile
+    keeps upstream's eager surface, and so does a session shaped like
+    upstream's own tests. Only the fork's presets ask for the deferred one,
+    and an operator who writes their own profile decides for themselves.
+
+    Deferral never changes permissions. It only moves schemas out of the
+    advertised list, and the tool instances stay in the same registry.
+    """
+    presets = source / "crates/zeroclaw-config/src/presets.rs"
+    if "the fork's runtime presets advertise the deferred surface" in presets.read_text():
+        raise RuntimeError(
+            f"Upstream overlay drift: the deferred built-in surface is already projected in {presets}"
+        )
+    # The three presets that build a struct literal name every field they set,
+    # so the flag goes in the literal. The anchor is the literal's own closing
+    # line, which each preset carries exactly once.
+    for fn_name in ("tight_runtime", "local_small_runtime", "unbounded_runtime"):
+        replace_required(
+            presets,
+            f"fn {fn_name}() -> RuntimeProfileConfig {{\n",
+            f"fn {fn_name}() -> RuntimeProfileConfig {{\n"
+            "    // The fork's runtime presets advertise the deferred surface: the\n"
+            "    // core built-ins are eager and the rest are browsed through\n"
+            "    // `tool_search`, which returns their full schemas on demand.\n",
+        )
+    for fn_name in ("tight_runtime", "local_small_runtime"):
+        replace_required(
+            presets,
+            f"fn {fn_name}() -> RuntimeProfileConfig {{\n"
+            "    // The fork's runtime presets advertise the deferred surface: the\n"
+            "    // core built-ins are eager and the rest are browsed through\n"
+            "    // `tool_search`, which returns their full schemas on demand.\n"
+            "    RuntimeProfileConfig {\n",
+            f"fn {fn_name}() -> RuntimeProfileConfig {{\n"
+            "    // The fork's runtime presets advertise the deferred surface: the\n"
+            "    // core built-ins are eager and the rest are browsed through\n"
+            "    // `tool_search`, which returns their full schemas on demand.\n"
+            "    RuntimeProfileConfig {\n"
+            "        deferred_builtin_tools: true,\n",
+        )
+    # `balanced_runtime` returns the schema default directly, so the flag has
+    # to be set on the profile it builds rather than on a struct literal.
+    replace_required(
+        presets,
+        "fn balanced_runtime() -> RuntimeProfileConfig {\n"
+        "    // Schema default is already the Balanced shape. Use it directly so\n"
+        "    // the preset can't drift from the schema default.\n"
+        "    RuntimeProfileConfig::default()\n"
+        "}\n",
+        "fn balanced_runtime() -> RuntimeProfileConfig {\n"
+        "    // The fork's runtime presets advertise the deferred surface: the\n"
+        "    // core built-ins are eager and the rest are browsed through\n"
+        "    // `tool_search`, which returns their full schemas on demand.\n"
+        "    // Schema default is already the Balanced shape. Use it directly so\n"
+        "    // the preset can't drift from the schema default.\n"
+        "    RuntimeProfileConfig {\n"
+        "        deferred_builtin_tools: true,\n"
+        "        ..RuntimeProfileConfig::default()\n"
+        "    }\n"
+        "}\n",
+    )
+    # `unbounded_runtime` names its own fields; the flag goes in the literal
+    # the same way the other two carry it.
+    replace_required(
+        presets,
+        "fn unbounded_runtime() -> RuntimeProfileConfig {\n"
+        "    // The fork's runtime presets advertise the deferred surface: the\n"
+        "    // core built-ins are eager and the rest are browsed through\n"
+        "    // `tool_search`, which returns their full schemas on demand.\n"
+        "    RuntimeProfileConfig {\n",
+        "fn unbounded_runtime() -> RuntimeProfileConfig {\n"
+        "    // The fork's runtime presets advertise the deferred surface: the\n"
+        "    // core built-ins are eager and the rest are browsed through\n"
+        "    // `tool_search`, which returns their full schemas on demand.\n"
+        "    RuntimeProfileConfig {\n"
+        "        deferred_builtin_tools: true,\n",
+    )
+
+
 def project_enact_family_delegate_tests(source):
     """Keep upstream provider-catalog assertions aligned with tool families."""
     delegate = source / "crates/zeroclaw-runtime/src/tools/delegate.rs"
@@ -7849,6 +7947,7 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
     project_enact_hooks_docs(SOURCE)
     project_enact_context_tools(SOURCE)
     project_enact_tool_families(SOURCE)
+    project_enact_deferred_builtin_surface(SOURCE)
     project_enact_excluded_memory_isolation(SOURCE)
     project_enact_memory_free_parent_scope(SOURCE)
     project_enact_relay_dial_test_seam(SOURCE)
