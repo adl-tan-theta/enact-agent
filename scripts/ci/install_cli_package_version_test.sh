@@ -80,7 +80,7 @@ cat >"$fixture/tools/rustc" <<'EOF'
 [ "$*" = --version ] || exit 1
 echo 'rustc 1.95.0'
 EOF
-cat >"$fixture/archive/zeroclaw" <<'EOF'
+cat >"$fixture/archive/enact-agent" <<'EOF'
 #!/bin/sh
 case "$*" in
   --version) printf '%s\n' "$FIXTURE_VERSION" ;;
@@ -93,21 +93,24 @@ cat >"$fixture/tools/cargo" <<'EOF'
 #!/bin/sh
 [ "$*" = 'install --path . --locked --force --no-default-features' ] || exit 1
 mkdir -p "$CARGO_HOME/bin"
-cp "$FIXTURE_ROOT/archive/zeroclaw" "$CARGO_HOME/bin/zeroclaw"
+cp "$FIXTURE_ROOT/archive/enact-agent-v0.8.7-x86_64-unknown-linux-gnu/enact-agent" "$CARGO_HOME/bin/enact-agent"
 EOF
 cat >"$fixture/tools/curl" <<'EOF'
 #!/bin/sh
+# The Enact fork resolves its own releases: the repository is
+# adl-tan-theta/enact-agent, the tag is `enact-agent-v<version>`, the asset is
+# `<tag>-<target>.tar.gz` and the checksum file is `SHA256SUMS-<version>`.
 case "$*" in
-  '-fsSL https://api.github.com/repos/zeroclaw-labs/zeroclaw/releases/latest')
-    echo '{"tag_name": "v0.8.7"}' ;;
-  '-fsSL https://github.com/zeroclaw-labs/zeroclaw/releases/download/v0.8.7/SHA256SUMS -o '*)
+  '-fsSL https://api.github.com/repos/adl-tan-theta/enact-agent/releases/latest')
+    echo '{"tag_name": "enact-agent-v0.8.7"}' ;;
+  '-fsSL https://github.com/adl-tan-theta/enact-agent/releases/download/enact-agent-v0.8.7/SHA256SUMS-0.8.7 -o '*)
     cp "$FIXTURE_ROOT/SHA256SUMS" "$4" ;;
-  '-fSL --progress-bar https://github.com/zeroclaw-labs/zeroclaw/releases/download/v0.8.7/zeroclaw-x86_64-unknown-linux-gnu.tar.gz -o '*)
+  '-fSL --progress-bar https://github.com/adl-tan-theta/enact-agent/releases/download/enact-agent-v0.8.7/enact-agent-v0.8.7-x86_64-unknown-linux-gnu.tar.gz -o '*)
     cp "$FIXTURE_ROOT/release.tar.gz" "$5" ;;
   *) echo "Unexpected fixture download: $*" >&2; exit 1 ;;
 esac
 EOF
-chmod +x "$fixture/tools/"{uname,ldd,rustc,cargo,curl} "$fixture/archive/zeroclaw"
+chmod +x "$fixture/tools/"{uname,ldd,rustc,cargo,curl} "$fixture/archive/enact-agent"
 cat >"$fixture/source/Cargo.toml" <<'EOF'
 [package]
 name = "zeroclaw"
@@ -117,8 +120,14 @@ edition = "2024"
 [features]
 default = []
 EOF
-tar -czf "$fixture/release.tar.gz" -C "$fixture/archive" zeroclaw
-printf '%s  zeroclaw-x86_64-unknown-linux-gnu.tar.gz\n' \
+# The Enact archive unpacks into a directory named after the tag and the
+# target, and the binary inside it is `enact-agent`.
+mkdir -p "$fixture/archive/enact-agent-v0.8.7-x86_64-unknown-linux-gnu"
+mv "$fixture/archive/enact-agent" \
+  "$fixture/archive/enact-agent-v0.8.7-x86_64-unknown-linux-gnu/enact-agent"
+tar -czf "$fixture/release.tar.gz" \
+  -C "$fixture/archive" enact-agent-v0.8.7-x86_64-unknown-linux-gnu
+printf '%s  enact-agent-v0.8.7-x86_64-unknown-linux-gnu.tar.gz\n' \
   "$(sha256sum "$fixture/release.tar.gz" | awk '{print $1}')" >"$fixture/SHA256SUMS"
 
 assert_output() {
@@ -139,13 +148,13 @@ for version_line in 'zeroclaw 0.8.7 (99bd353)' 'zeroclaw 0.8.7 (v0.8.7-33-ge6e4b
     case_count=$((case_count + 1))
     home="$fixture/home-$case_count"
     mkdir -p "$home/.cargo/bin" "$home/old-bin"
-    sed 's/FIXTURE_VERSION/FIXTURE_OLD_VERSION/g' "$fixture/archive/zeroclaw" >"$home/old-bin/zeroclaw"
-    chmod +x "$home/old-bin/zeroclaw"
+    sed 's/FIXTURE_VERSION/FIXTURE_OLD_VERSION/g' "$fixture/archive/enact-agent-v0.8.7-x86_64-unknown-linux-gnu/enact-agent" >"$home/old-bin/enact-agent"
+    chmod +x "$home/old-bin/enact-agent"
     args=("--$mode" --no-modify-path --skip-quickstart)
     if [[ "$mode" == source ]]; then
       args+=(--minimal --apps none)
     elif [[ "$mode" == uninstall ]]; then
-      cp "$fixture/archive/zeroclaw" "$home/.cargo/bin/zeroclaw"
+      cp "$fixture/archive/enact-agent-v0.8.7-x86_64-unknown-linux-gnu/enact-agent" "$home/.cargo/bin/enact-agent"
     fi
     output="$fixture/output-$case_count"
     echo "Fixture: $mode, LC_ALL=C, non-TTY, input=$version_line, existing=$old_version_line"
@@ -156,8 +165,8 @@ for version_line in 'zeroclaw 0.8.7 (99bd353)' 'zeroclaw 0.8.7 (v0.8.7-33-ge6e4b
         FIXTURE_VERSION="$version_line" FIXTURE_OLD_VERSION="$old_version_line" /bin/sh "$INSTALL_SH" "${args[@]}" </dev/null
     ) >"$output" 2>&1 || { cat "$output" >&2; exit 1; }
     if [[ "$mode" == uninstall ]]; then
-      assert_output "$output" "Another zeroclaw found at $home/old-bin/zeroclaw (v$old_package_version)"
-      [[ ! -e "$home/.cargo/bin/zeroclaw" ]]
+      assert_output "$output" "Another enact-agent found at $home/old-bin/enact-agent (v$old_package_version)"
+      [[ ! -e "$home/.cargo/bin/enact-agent" ]]
     else
       if [[ "$mode" == prebuilt ]]; then
         assert_output "$output" "Checksum verified"
@@ -166,10 +175,10 @@ for version_line in 'zeroclaw 0.8.7 (99bd353)' 'zeroclaw 0.8.7 (v0.8.7-33-ge6e4b
           exit 1
         fi
       fi
-      assert_output "$output" "Installed: $home/.cargo/bin/zeroclaw (v$package_version,"
+      assert_output "$output" "Installed: $home/.cargo/bin/enact-agent (v$package_version,"
       if [[ "$mode" == source ]]; then
-        assert_output "$output" "zeroclaw found at $home/old-bin/zeroclaw (v$old_package_version)"
-        assert_output "$output" "zeroclaw in your PATH is $home/old-bin/zeroclaw (v$old_package_version)"
+        assert_output "$output" "enact-agent found at $home/old-bin/enact-agent (v$old_package_version)"
+        assert_output "$output" "enact-agent in your PATH is $home/old-bin/enact-agent (v$old_package_version)"
         assert_output "$output" "It will shadow the v$package_version binary you just installed"
       fi
     fi
