@@ -1,7 +1,8 @@
-name: QG Probe
+name: QG Probe Push
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [enact/branding]
 
 permissions:
   contents: read
