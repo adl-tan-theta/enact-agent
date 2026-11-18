@@ -22,9 +22,12 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-15-intel, macos-15]
+    # The `runner` context is not available in a job-level `env:` block — the
+    # workflow file is rejected outright when it appears there — so the
+    # server socket path is set per step instead. `github.workspace` is
+    # available at job level and is used by every step that needs it.
     env:
       SCCACHE_BASEDIRS: ${{ github.workspace }}
-      SCCACHE_SERVER_UDS: ${{ runner.temp }}/enact-agent-sccache.sock
       SCCACHE_IDLE_TIMEOUT: '0'
     defaults:
       run:
@@ -47,6 +50,7 @@ jobs:
           SCCACHE_AZURE_CONNECTION_STRING: ${{ secrets.SCCACHE_AZURE_CONNECTION_STRING }}
           SCCACHE_AZURE_BLOB_CONTAINER: ${{ vars.SCCACHE_AZURE_BLOB_CONTAINER }}
           SCCACHE_AZURE_KEY_PREFIX: ${{ vars.SCCACHE_AZURE_KEY_PREFIX }}
+          SCCACHE_SERVER_UDS: ${{ runner.temp }}/enact-agent-sccache.sock
         run: |
           set -euo pipefail
           if [[ -z "${SCCACHE_AZURE_CONNECTION_STRING:-}" || -z "${SCCACHE_AZURE_BLOB_CONTAINER:-}" ]]; then
@@ -73,6 +77,8 @@ jobs:
             printf 'RUSTC_WRAPPER=%s\n' "$SCCACHE_PATH"
           } >> "$GITHUB_ENV"
       - name: Build committed source and qualify extracted archive
+        env:
+          SCCACHE_SERVER_UDS: ${{ runner.temp }}/enact-agent-sccache.sock
         run: |
           set -euo pipefail
           git remote rename origin enact
