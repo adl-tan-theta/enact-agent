@@ -40,12 +40,28 @@ jobs:
       - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
         with:
           python-version: '3.12'
+      - name: Detect whether the shared cache is configured
+        id: cache
+        env:
+          SCCACHE_AZURE_CONNECTION_STRING: ${{ secrets.SCCACHE_AZURE_CONNECTION_STRING }}
+          SCCACHE_AZURE_BLOB_CONTAINER: ${{ vars.SCCACHE_AZURE_BLOB_CONTAINER }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${SCCACHE_AZURE_CONNECTION_STRING:-}" && -n "${SCCACHE_AZURE_BLOB_CONTAINER:-}" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "Shared Azure Blob sccache is configured; the build will use it."
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "Shared Azure Blob sccache is not configured; the build will run without a compiler wrapper."
+          fi
       - name: Install pinned sccache
+        if: steps.cache.outputs.configured == 'true'
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.18.0
           disable_annotations: true
       - name: Enable isolated Azure Blob cache server
+        if: steps.cache.outputs.configured == 'true'
         env:
           SCCACHE_AZURE_CONNECTION_STRING: ${{ secrets.SCCACHE_AZURE_CONNECTION_STRING }}
           SCCACHE_AZURE_BLOB_CONTAINER: ${{ vars.SCCACHE_AZURE_BLOB_CONTAINER }}
@@ -53,10 +69,6 @@ jobs:
           SCCACHE_SERVER_UDS: ${{ runner.temp }}/enact-agent-sccache.sock
         run: |
           set -euo pipefail
-          if [[ -z "${SCCACHE_AZURE_CONNECTION_STRING:-}" || -z "${SCCACHE_AZURE_BLOB_CONTAINER:-}" ]]; then
-            echo "Shared sccache requires SCCACHE_AZURE_CONNECTION_STRING secret and SCCACHE_AZURE_BLOB_CONTAINER repository variable." >&2
-            exit 1
-          fi
           test -x "$SCCACHE_PATH"
           sccache --start-server
           sccache --zero-stats
@@ -98,10 +110,23 @@ jobs:
           env -i HOME="$HOME" PATH="$PATH" LANG=C.UTF-8 "$cargo_bin" fetch --locked
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
           output="$RUNNER_TEMP/enact-release"
+          # The shared cache is optional. `build.py` supports
+          # `ENACT_AGENT_USE_SCCACHE=0`, which builds without a compiler
+          # wrapper, so the credential is never required for a correct build —
+          # only for a fast one. The compiler environment is built from the
+          # variables present here, so the cache variables are exported only
+          # when the cache was actually configured.
+          if [[ "${{ steps.cache.outputs.configured }}" == "true" ]]; then
+            export ENACT_AGENT_USE_SCCACHE=1
+            export RUSTC_WRAPPER="$SCCACHE_PATH"
+          else
+            export ENACT_AGENT_USE_SCCACHE=0
+            unset RUSTC_WRAPPER
+          fi
           env -i HOME="$HOME" PATH="$PATH" LANG=C.UTF-8 \
             ENACT_AGENT_USE_SCCACHE="$ENACT_AGENT_USE_SCCACHE" \
-            RUSTC_WRAPPER="$RUSTC_WRAPPER" CARGO_INCREMENTAL=0 \
-            SCCACHE_BASEDIRS="$SCCACHE_BASEDIRS" SCCACHE_SERVER_UDS="$SCCACHE_SERVER_UDS" SCCACHE_IDLE_TIMEOUT=0 \
+            RUSTC_WRAPPER="${RUSTC_WRAPPER:-}" CARGO_INCREMENTAL=0 \
+            SCCACHE_BASEDIRS="$SCCACHE_BASEDIRS" SCCACHE_SERVER_UDS="${SCCACHE_SERVER_UDS:-}" SCCACHE_IDLE_TIMEOUT=0 \
             "$python_bin" -B overlays/enact/build.py release --cargo "$cargo_bin" --rustc "$rustc_bin" --output-dir "$output"
           archives=("$output"/*.tar.gz)
           test "${#archives[@]}" -eq 1
@@ -109,6 +134,12 @@ jobs:
           tar -xzf "${archives[0]}" -C "$RUNNER_TEMP/enact-extracted"
           payload="$(find "$RUNNER_TEMP/enact-extracted" -type f -name enact-agent)"
           env -i HOME="$HOME" PATH="$PATH" LANG=C.UTF-8 "$python_bin" -B overlays/enact/probe_native.py --binary "$payload"
+      - name: Report Azure Blob sccache stats
+        if: steps.cache.outputs.configured == 'true'
+        env:
+          SCCACHE_SERVER_UDS: ${{ runner.temp }}/enact-agent-sccache.sock
+        run: |
+          set -euo pipefail
           "$SCCACHE_PATH" --show-stats --stats-format json > "$RUNNER_TEMP/enact-sccache-final.json"
           python3 - "$RUNNER_TEMP/enact-sccache-final.json" <<'PY'
           import json

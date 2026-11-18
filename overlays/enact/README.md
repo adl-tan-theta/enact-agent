@@ -55,25 +55,32 @@ under `$HOME/.local/share/enact-agent/`, with a launcher link in
 This local release has no notarization or GitHub build attestation. Checksums
 establish file integrity, not publisher identity.
 
-The optional **Enact Agent native build** workflow runs only on manual dispatch
-from a protected `enact/branding` ref. Ubuntu 22.04 x64, macOS 15 Intel and Apple
-Silicon runners use the canonical workspace `rust-version`, locked dependency
-prefetch, Azure Blob sccache and the offline release build. Configure the
-repository secret `SCCACHE_AZURE_CONNECTION_STRING` and repository variable
+The optional **Enact Agent native build** workflow runs on every push to the
+protected `enact/branding` ref and on manual dispatch. Ubuntu 22.04 x64, macOS 15
+Intel and Apple Silicon runners use the canonical workspace `rust-version`, locked
+dependency prefetch and the offline release build.
+
+The Azure Blob sccache is **optional** and only makes the build faster. Configure
+the repository secret `SCCACHE_AZURE_CONNECTION_STRING` and repository variable
 `SCCACHE_AZURE_BLOB_CONTAINER` to the same cache used by Enact; set
-`SCCACHE_AZURE_KEY_PREFIX` only when that shared cache uses a prefix. The
-workflow fails before building when the required secret or container variable
-is missing. Use a container-scoped, least-privilege SAS connection string, not
-an account-wide storage key. The secret is supplied only when starting the
-sccache server and is omitted from Cargo's compiler environment. Build code on
-the same runner account can inspect the server process, so protect
-`enact/branding` and run only trusted source there. Each job normalizes the
-checkout root for cross-worktree cache keys, asserts the Azure backend is
-selected, rejects cache read/write errors and reports sccache stats. Each job
-tests the extracted archive against the local fixture and uploads its target
-archive plus `SHA256SUMS` as workflow artifacts. It does not publish a GitHub
-Release or use provider credentials. Each additional target remains unqualified
-until its native job passes; no existing machine's architecture is assumed.
+`SCCACHE_AZURE_KEY_PREFIX` only when that shared cache uses a prefix. When both
+the secret and the container variable are present the workflow starts the shared
+cache server and builds through it; when either is missing the workflow says so
+and builds with `ENACT_AGENT_USE_SCCACHE=0`, which is a correct build without a
+compiler wrapper. The cache credential is never required for a correct build,
+only for a fast one.
+
+Use a container-scoped, least-privilege SAS connection string, not an account-wide
+storage key. The secret is supplied only when starting the sccache server and is
+omitted from Cargo's compiler environment. Build code on the same runner account
+can inspect the server process, so protect `enact/branding` and run only trusted
+source there. Each job normalizes the checkout root for cross-worktree cache keys,
+asserts the Azure backend is selected, rejects cache read/write errors and reports
+sccache stats. Each job tests the extracted archive against the local fixture and
+uploads its target archive plus `SHA256SUMS` as workflow artifacts. It does not
+publish a GitHub Release or use provider credentials. Each additional target remains
+unqualified until its native job passes; no existing machine's architecture is
+assumed.
 
 ### Use shared sccache for a local native build
 
