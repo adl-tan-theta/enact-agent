@@ -17,7 +17,7 @@ Read the relevant owner before changing behavior or documenting a claim.
 | [build.py](build.py) | Prepared-source transformations, native feature selection, provenance, archive and privacy guards |
 | [Cargo.toml](../../Cargo.toml) and [Cargo.lock](../../Cargo.lock) | Upstream runtime version, declared Rust floor, feature definitions, locked dependencies |
 | [probe_native.py](probe_native.py) and [test_build.py](test_build.py) | Native boundary qualification and focused overlay checks |
-| [native workflow](../../.github/workflows/enact-agent-build.yml) | Manual native runner matrix, selected toolchain, extracted-archive fixture |
+| [native workflow](../../.github/workflows/enact-agent-native-build.yml) | Native runner matrix on every push to the integration branch, selected toolchain, extracted-archive fixture |
 | [web branding helper](../../web/src/lib/branding.ts) and `web/public/enact-logo*.svg` | Dashboard presentation and canonical vector assets |
 
 Use [README.md](README.md) for optional dashboard/desktop build prerequisites.

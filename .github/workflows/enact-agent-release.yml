@@ -1,0 +1,441 @@
+name: Enact Agent Release
+
+# The fork publishes its own distribution tags: `enact-agent-v<version>`,
+# where `<version>` is `X.Y.Z-enact.N` as recorded in `overlays/enact/release.json`.
+# These are deliberately separate from the upstream `v*` tags, which stay
+# reserved for ZeroClaw itself.
+#
+# `install.sh` resolves the newest published distribution from the GitHub
+# Releases "latest" endpoint and fetches `<tag>-<target>.tar.gz` plus
+# `SHA256SUMS-<version>`. This workflow is what makes that contract true, so
+# the asset names and the checksum file name are load-bearing: changing either
+# one here breaks the installer.
+
+on:
+  push:
+    tags:
+      - "enact-agent-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Distribution version to release (e.g. 0.9.0-enact.1)"
+        required: true
+        type: string
+
+concurrency:
+  # A release is cut from an immutable tag, so a second run for the same tag
+  # would republish identical bytes. The group is versioned so a wedged run
+  # can always be escaped by a later one.
+  group: enact-agent-release-v2
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate Release Version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.12'
+      - name: The tag matches the recorded distribution version
+        id: check
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version || '' }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          # `overlays/enact/release.json` is the single source of truth for the
+          # distribution version. The tag, the release assets and the checksum
+          # file are all derived from it, so a mismatch here is a hard failure
+          # rather than something to reconcile downstream.
+          version=$(python3 -c 'import json,pathlib; print(json.loads(pathlib.Path("overlays/enact/release.json").read_text())["version"])')
+          cargo_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-enact\.[0-9]+$ ]]; then
+            echo "::error::Distribution version must use X.Y.Z-enact.N. Got: ${version}"
+            exit 1
+          fi
+
+          # The packaged binary reports the upstream crate version, and
+          # `build.py` refuses to package a release whose base does not match
+          # it. Checking it here turns that late failure into an early one.
+          if [[ "${version%%-enact.*}" != "$cargo_version" ]]; then
+            echo "::error::Distribution version base (${version%%-enact.*}) does not match Cargo.toml (${cargo_version})."
+            exit 1
+          fi
+
+          tag="enact-agent-v${version}"
+
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            if [[ "$REF_NAME" != "$tag" ]]; then
+              echo "::error::Tag ${REF_NAME} does not match the recorded distribution tag ${tag}."
+              exit 1
+            fi
+          else
+            if [[ "$INPUT_VERSION" != "$version" ]]; then
+              echo "::error::Requested version (${INPUT_VERSION}) does not match overlays/enact/release.json (${version})."
+              exit 1
+            fi
+            if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+              echo "::error::Tag ${tag} already exists."
+              exit 1
+            fi
+          fi
+
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.os }}
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    # A release build is a full workspace compile plus a component probe. It
+    # takes ~20 minutes on a Linux runner but 45-80 minutes on the macOS
+    # runners, which are often oversubscribed, so this ceiling leaves real
+    # headroom for a slower runner before a working build is killed.
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        # The distribution ships the three targets `install.sh` can resolve:
+        # Apple Silicon macOS, Intel macOS and x86_64 Linux. Each runner builds
+        # for its own host triple, and `build.py` names the archive after the
+        # target it detects.
+        os: [ubuntu-22.04, macos-15-intel, macos-15]
+    env:
+      SCCACHE_BASEDIRS: ${{ github.workspace }}
+      SCCACHE_IDLE_TIMEOUT: '0'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.12'
+      - name: Detect whether the shared cache is configured
+        id: cache
+        env:
+          SCCACHE_AZURE_CONNECTION_STRING: ${{ secrets.SCCACHE_AZURE_CONNECTION_STRING }}
+          SCCACHE_AZURE_BLOB_CONTAINER: ${{ vars.SCCACHE_AZURE_BLOB_CONTAINER }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${SCCACHE_AZURE_CONNECTION_STRING:-}" && -n "${SCCACHE_AZURE_BLOB_CONTAINER:-}" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "Shared Azure Blob sccache is configured; the build will use it."
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "Shared Azure Blob sccache is not configured; the build will run without a compiler wrapper."
+          fi
+      - name: Install pinned sccache
+        if: steps.cache.outputs.configured == 'true'
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.18.0
+          disable_annotations: true
+      - name: Enable isolated Azure Blob cache server
+        if: steps.cache.outputs.configured == 'true'
+        env:
+          SCCACHE_AZURE_CONNECTION_STRING: ${{ secrets.SCCACHE_AZURE_CONNECTION_STRING }}
+          SCCACHE_AZURE_BLOB_CONTAINER: ${{ vars.SCCACHE_AZURE_BLOB_CONTAINER }}
+          SCCACHE_AZURE_KEY_PREFIX: ${{ vars.SCCACHE_AZURE_KEY_PREFIX }}
+          SCCACHE_SERVER_UDS: ${{ runner.temp }}/enact-agent-sccache.sock
+        run: |
+          set -euo pipefail
+          test -x "$SCCACHE_PATH"
+          sccache --start-server
+          sccache --zero-stats
+          "$SCCACHE_PATH" --show-stats --stats-format json > "$RUNNER_TEMP/enact-sccache-start.json"
+          python3 - "$RUNNER_TEMP/enact-sccache-start.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          info = json.loads(Path(sys.argv[1]).read_text())
+          location = info.get("cache_location", "")
+          if not location.startswith("azblob"):
+              raise SystemExit(f"Expected Azure Blob sccache backend, got {location!r}")
+          print("Azure Blob sccache backend selected")
+          PY
+          {
+            printf 'ENACT_AGENT_USE_SCCACHE=1\n'
+            printf 'RUSTC_WRAPPER=%s\n' "$SCCACHE_PATH"
+          } >> "$GITHUB_ENV"
+      - name: Build committed source and qualify extracted archive
+        env:
+          SCCACHE_SERVER_UDS: ${{ runner.temp }}/enact-agent-sccache.sock
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # `build.py` requires `origin` to name the upstream repository, which
+          # is the fork's documented remote layout (`origin` = upstream,
+          # `enact` = this fork; see overlays/enact/AGENTS.md). The rename
+          # keeps the fork's own remote under `enact` so the release still
+          # records where it came from.
+          #
+          # No upstream code is fetched: `build.py prepare` archives this
+          # repository's own commit and applies the overlay projections under
+          # `overlays/enact/`. The remote only has to satisfy the provenance
+          # check.
+          git remote rename origin enact
+          git remote add origin https://github.com/zeroclaw-labs/zeroclaw.git
+          python_bin="$(command -v python)"
+          test -x "$python_bin"
+          msrv="$("$python_bin" -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["rust-version"])')"
+          [[ "$msrv" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          rustup toolchain install "$msrv" --profile minimal --component rustfmt
+          rustup default "$msrv"
+          cargo_bin="$(rustup which cargo)"
+          rustc_bin="$(rustup which rustc)"
+          printf 'Python executable: %s\n' "$python_bin"
+          "$python_bin" --version
+          "$cargo_bin" --version
+          "$rustc_bin" --version
+          env -i HOME="$HOME" PATH="$PATH" LANG=C.UTF-8 "$cargo_bin" fetch --locked
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          output="$RUNNER_TEMP/enact-release"
+          # The shared cache is optional. `build.py` supports
+          # `ENACT_AGENT_USE_SCCACHE=0`, which builds without a compiler
+          # wrapper, so the credential is never required for a correct build —
+          # only for a fast one. The compiler environment is built from the
+          # variables present here, so the cache variables are exported only
+          # when the cache was actually configured.
+          if [[ "${{ steps.cache.outputs.configured }}" == "true" ]]; then
+            export ENACT_AGENT_USE_SCCACHE=1
+            export RUSTC_WRAPPER="$SCCACHE_PATH"
+          else
+            export ENACT_AGENT_USE_SCCACHE=0
+            unset RUSTC_WRAPPER
+          fi
+          env -i HOME="$HOME" PATH="$PATH" LANG=C.UTF-8 \
+            ENACT_AGENT_USE_SCCACHE="$ENACT_AGENT_USE_SCCACHE" \
+            RUSTC_WRAPPER="${RUSTC_WRAPPER:-}" CARGO_INCREMENTAL=0 \
+            SCCACHE_BASEDIRS="$SCCACHE_BASEDIRS" SCCACHE_SERVER_UDS="${SCCACHE_SERVER_UDS:-}" SCCACHE_IDLE_TIMEOUT=0 \
+            "$python_bin" -B overlays/enact/build.py release --cargo "$cargo_bin" --rustc "$rustc_bin" --output-dir "$output"
+
+          # The archive and the checksum file are named from the recorded
+          # distribution tag, not from the ref that triggered this run. Check
+          # both here so a mis-derived name fails in the build job rather than
+          # after the release is public.
+          archives=("$output"/*.tar.gz)
+          test "${#archives[@]}" -eq 1
+          archive_name="$(basename "${archives[0]}")"
+          # `case` matches the pattern; `test =` compares literal strings and
+          # would never match a glob.
+          case "$archive_name" in
+            "${RELEASE_TAG}-"*.tar.gz) ;;
+            *) echo "::error::Archive ${archive_name} is not named after ${RELEASE_TAG}." >&2; exit 1 ;;
+          esac
+          test -f "$output/SHA256SUMS"
+
+          # The overlay writes the checksum file as `SHA256SUMS`. Every build
+          # job produces one, and the publish job merges the three artifacts
+          # into a single directory — three files with the same name would
+          # overwrite each other and leave one platform described. Rename it
+          # after this job's target so the merge stays lossless.
+          target="${archive_name#"${RELEASE_TAG}-"}"
+          target="${target%.tar.gz}"
+          mv "$output/SHA256SUMS" "$output/SHA256SUMS-${target}"
+
+          mkdir "$RUNNER_TEMP/enact-extracted"
+          tar -xzf "${archives[0]}" -C "$RUNNER_TEMP/enact-extracted"
+          payload="$(find "$RUNNER_TEMP/enact-extracted" -type f -name enact-agent)"
+          env -i HOME="$HOME" PATH="$PATH" LANG=C.UTF-8 "$python_bin" -B overlays/enact/probe_native.py --binary "$payload"
+      - name: Report Azure Blob sccache stats
+        if: steps.cache.outputs.configured == 'true'
+        env:
+          SCCACHE_SERVER_UDS: ${{ runner.temp }}/enact-agent-sccache.sock
+        run: |
+          set -euo pipefail
+          "$SCCACHE_PATH" --show-stats --stats-format json > "$RUNNER_TEMP/enact-sccache-final.json"
+          python3 - "$RUNNER_TEMP/enact-sccache-final.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          stats = json.loads(Path(sys.argv[1]).read_text())["stats"]
+          errors = stats["cache_errors"]["counts"]
+          failed_reads = stats["cache_read_errors"]
+          failed_writes = stats["cache_write_errors"]
+          timeouts = stats["cache_timeouts"]
+          if sum(errors.values()) or failed_reads or failed_writes or timeouts:
+              raise SystemExit(
+                  f"Azure Blob sccache errors: cache={sum(errors.values())}, "
+                  f"read={failed_reads}, write={failed_writes}, timeouts={timeouts}"
+              )
+          print(
+              f"Azure Blob sccache: hits={sum(stats['cache_hits']['counts'].values())}, "
+              f"writes={stats['cache_writes']}, errors=0"
+          )
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: enact-agent-release-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/enact-release/*.tar.gz
+            ${{ runner.temp }}/enact-release/SHA256SUMS-*
+          if-no-files-found: error
+
+  publish:
+    name: Publish Release
+    needs: [validate, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: release-assets
+          pattern: enact-agent-release-*
+          merge-multiple: true
+      - name: Assemble the checksum manifest
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          assets="$GITHUB_WORKSPACE/release-assets"
+          manifest="$assets/SHA256SUMS-${RELEASE_VERSION}"
+
+          # Each build job contributes one checksum line for its own archive,
+          # named after that archive's target. `install.sh` fetches a single
+          # manifest and looks up its platform's asset in it, so the published
+          # manifest must list every platform.
+          parts=()
+          for part in "$assets"/SHA256SUMS-*; do
+            # The assembled manifest is written into the same directory, so it
+            # would match this glob on a second pass. Skip it explicitly.
+            [ "$part" = "$manifest" ] && continue
+            parts+=("$part")
+          done
+          test "${#parts[@]}" -eq 3
+          cat "${parts[@]}" > "$manifest"
+          sort -k2 -o "$manifest" "$manifest"
+
+          archives=("$assets"/*.tar.gz)
+          test "${#archives[@]}" -eq 3
+
+          # Every published asset is named after the distribution tag, and the
+          # checksum manifest must describe exactly those files.
+          for archive in "${archives[@]}"; do
+            name="$(basename "$archive")"
+            case "$name" in
+              "${RELEASE_TAG}-"*.tar.gz) ;;
+              *) echo "::error::Unexpected release asset name: ${name}" >&2; exit 1 ;;
+            esac
+            grep -q " ${name}\$" "$manifest" \
+              || { echo "::error::${name} is missing from the checksum manifest" >&2; exit 1; }
+          done
+
+          # The manifest also ships under the plain name the overlay writes, so
+          # both spellings resolve to identical bytes.
+          cp "$manifest" "$assets/SHA256SUMS"
+
+          ( cd "$assets" && sha256sum -c "SHA256SUMS-${RELEASE_VERSION}" )
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          EVENT_NAME: ${{ github.event_name }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          cat > release-notes.md <<EOF
+          ## Enact Agent ${RELEASE_VERSION}
+
+          Pre-built native binaries for Apple Silicon macOS, Intel macOS and
+          x86_64 Linux.
+
+          | Platform | Asset |
+          | --- | --- |
+          | aarch64-apple-darwin | \`${RELEASE_TAG}-aarch64-apple-darwin.tar.gz\` |
+          | x86_64-apple-darwin | \`${RELEASE_TAG}-x86_64-apple-darwin.tar.gz\` |
+          | x86_64-unknown-linux-gnu | \`${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz\` |
+
+          Verify a download against \`SHA256SUMS-${RELEASE_VERSION}\`:
+
+          \`\`\`sh
+          sha256sum -c SHA256SUMS-${RELEASE_VERSION}
+          \`\`\`
+
+          The archive unpacks into a directory named after the tag and target and
+          contains the \`enact-agent\` binary.
+
+          SHA-256 checksums detect changes; they do not establish publisher
+          identity.
+          EOF
+
+          # `--latest` matters: `install.sh` resolves the newest distribution
+          # through the Releases "latest" endpoint, which ignores pre-releases.
+          # A release published without it would be invisible to the installer.
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            gh release create "$RELEASE_TAG" \
+              release-assets/*.tar.gz \
+              "release-assets/SHA256SUMS-${RELEASE_VERSION}" \
+              release-assets/SHA256SUMS \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Enact Agent ${RELEASE_VERSION}" \
+              --notes-file release-notes.md \
+              --target "$COMMIT_SHA" \
+              --latest
+          else
+            gh release create "$RELEASE_TAG" \
+              release-assets/*.tar.gz \
+              "release-assets/SHA256SUMS-${RELEASE_VERSION}" \
+              release-assets/SHA256SUMS \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Enact Agent ${RELEASE_VERSION}" \
+              --notes-file release-notes.md \
+              --latest
+          fi
+      - name: Verify the published release resolves for the installer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # The installer resolves the release through the "latest" endpoint
+          # and then looks up its own platform's asset in the checksum
+          # manifest. Replay exactly that path here, so a release that the
+          # installer cannot consume fails in this run rather than in a
+          # user's terminal.
+          latest=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name')
+          test "$latest" = "$RELEASE_TAG"
+
+          for asset in \
+            "${RELEASE_TAG}-aarch64-apple-darwin.tar.gz" \
+            "${RELEASE_TAG}-x86_64-apple-darwin.tar.gz" \
+            "${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz" \
+            "SHA256SUMS-${RELEASE_VERSION}"; do
+            gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" \
+              --jq ".assets[].name" | grep -Fxq "$asset" \
+              || { echo "::error::Published release is missing ${asset}" >&2; exit 1; }
+          done

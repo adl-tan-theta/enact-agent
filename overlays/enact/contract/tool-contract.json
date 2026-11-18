@@ -1,0 +1,232 @@
+{
+  "canonical_tools": [
+    "TodoWrite",
+    "a2a",
+    "ask_user",
+    "ast_edit",
+    "ast_grep",
+    "backup",
+    "browser",
+    "browser_delegate",
+    "browser_open",
+    "calculator",
+    "callgraph",
+    "canvas",
+    "channel_room",
+    "checkpoint",
+    "claude_code",
+    "claude_code_runner",
+    "cloud",
+    "codex_cli",
+    "compose",
+    "composio",
+    "content_search",
+    "cron",
+    "data_management",
+    "delegate",
+    "deliver_file",
+    "discord_search",
+    "email",
+    "escalate_to_human",
+    "execute_pipeline",
+    "expand",
+    "file_download",
+    "file_edit",
+    "file_read",
+    "file_uploads",
+    "file_write",
+    "gemini_cli",
+    "git_forge",
+    "git_operations",
+    "glob_search",
+    "google_workspace",
+    "graph",
+    "http_request",
+    "image_gen",
+    "image_info",
+    "jira",
+    "knowledge",
+    "learn",
+    "linkedin",
+    "llm_task",
+    "mcp",
+    "memory",
+    "microsoft365",
+    "model",
+    "notion",
+    "opencode_cli",
+    "plan_execute",
+    "plan_mode",
+    "poll",
+    "project_intel",
+    "proxy_config",
+    "pushover",
+    "radar",
+    "reaction",
+    "read_skill",
+    "report_template",
+    "rewind",
+    "screenshot",
+    "security_ops",
+    "send_message_to_peer",
+    "send_via",
+    "sessions",
+    "shell",
+    "skill_manage",
+    "skill_view",
+    "skills_list",
+    "sop",
+    "spawn_subagent",
+    "text_browser",
+    "tool_search",
+    "wait",
+    "weather",
+    "web_fetch",
+    "web_search_tool"
+  ],
+  "families": {
+    "a2a": {
+      "actions": [
+        "discover",
+        "send",
+        "get_task",
+        "cancel"
+      ]
+    },
+    "cloud": {
+      "actions": [
+        "architecture_review",
+        "assess_migration",
+        "cost_analysis",
+        "review_iac",
+        "list",
+        "match"
+      ]
+    },
+    "cron": {
+      "actions": [
+        "cron_add",
+        "cron_list",
+        "cron_remove",
+        "update",
+        "run",
+        "list_runs",
+        "schedule_add",
+        "cancel",
+        "create",
+        "get",
+        "schedule_list",
+        "once",
+        "pause",
+        "schedule_remove",
+        "resume"
+      ]
+    },
+    "email": {
+      "actions": [
+        "search",
+        "read"
+      ]
+    },
+    "file_uploads": {
+      "actions": [
+        "upload",
+        "upload_bundle"
+      ]
+    },
+    "mcp": {
+      "actions": [
+        "mcp_resources_list",
+        "read",
+        "mcp_prompts_list",
+        "get"
+      ]
+    },
+    "memory": {
+      "actions": [
+        "store",
+        "recall",
+        "forget",
+        "export",
+        "purge"
+      ]
+    },
+    "model": {
+      "actions": [
+        "model_switch_get",
+        "list_model_providers",
+        "list_models",
+        "set",
+        "model_routing_config_get",
+        "list_hints",
+        "remove_agent",
+        "remove_scenario",
+        "set_default",
+        "upsert_agent",
+        "upsert_scenario"
+      ]
+    },
+    "sessions": {
+      "actions": [
+        "current",
+        "list",
+        "history",
+        "send"
+      ]
+    },
+    "sop": {
+      "actions": [
+        "sop_list",
+        "execute",
+        "advance",
+        "approve",
+        "status",
+        "propose",
+        "capture_run",
+        "sop_workshop_list",
+        "inspect",
+        "apply",
+        "reject",
+        "quarantine"
+      ]
+    }
+  },
+  "legacy_members": {
+    "a2a_cancel": "a2a",
+    "a2a_discover": "a2a",
+    "a2a_get_task": "a2a",
+    "a2a_send": "a2a",
+    "cloud_ops": "cloud",
+    "cloud_patterns": "cloud",
+    "cron_add": "cron",
+    "cron_list": "cron",
+    "cron_remove": "cron",
+    "cron_run": "cron",
+    "cron_runs": "cron",
+    "cron_update": "cron",
+    "email_read": "email",
+    "email_search": "email",
+    "file_upload": "file_uploads",
+    "file_upload_bundle": "file_uploads",
+    "mcp_prompts": "mcp",
+    "mcp_resources": "mcp",
+    "memory_export": "memory",
+    "memory_forget": "memory",
+    "memory_purge": "memory",
+    "memory_recall": "memory",
+    "memory_store": "memory",
+    "model_routing_config": "model",
+    "model_switch": "model",
+    "schedule": "cron",
+    "sessions_current": "sessions",
+    "sessions_history": "sessions",
+    "sessions_list": "sessions",
+    "sessions_send": "sessions",
+    "sop_advance": "sop",
+    "sop_approve": "sop",
+    "sop_execute": "sop",
+    "sop_list": "sop",
+    "sop_status": "sop",
+    "sop_workshop": "sop"
+  }
+}

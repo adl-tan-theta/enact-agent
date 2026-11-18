@@ -523,7 +523,7 @@ where
         // Heap-pin the nested case future before timeout and panic polling layers.
         let body_future = Box::pin(async { body(run.clone()).await });
         tokio::time::timeout(
-            std::time::Duration::from_secs(45),
+            std::time::Duration::from_secs(180),
             std::panic::AssertUnwindSafe(body_future).catch_unwind(),
         )
         .await

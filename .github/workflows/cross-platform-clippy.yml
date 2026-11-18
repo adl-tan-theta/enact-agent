@@ -1,5 +1,14 @@
 name: Cross-Platform Clippy
 
+# Kept in the Enact fork.
+#
+# This workflow lints the fork's own Rust on the platforms the fork ships
+# for. The Windows leg has failed on the rustup bootstrap step — a network
+# failure fetching the toolchain, not a lint finding — so the failure is
+# infrastructure rather than code. The disposition is to keep the workflow
+# and treat a toolchain-bootstrap failure as a runner problem, not as a
+# regression in the fork.
+
 on:
   # Manual plus scheduled only: keep platform-gated lint regressions visible
   # without adding macOS/Windows latency to the required PR gate.

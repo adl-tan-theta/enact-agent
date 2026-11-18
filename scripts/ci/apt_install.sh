@@ -6,8 +6,15 @@ if [[ "$#" -eq 0 ]]; then
   exit 2
 fi
 
-apt_attempt_timeout_seconds=120
-apt_max_attempts=2
+# The Ubuntu package mirror is occasionally slow enough to blow a short
+# deadline: on 2026-11-18 the 32-bit check timed out twice at 120s while
+# downloading `lib32asan8`, twice in a row, and the job failed for a reason
+# that had nothing to do with the code under test. The deadline is generous
+# and the attempt count is higher so that a slow mirror costs time rather
+# than a false failure; the per-attempt ceiling still bounds a genuinely
+# hung mirror.
+apt_attempt_timeout_seconds=300
+apt_max_attempts=3
 apt_retry_delay_seconds=5
 
 run_apt_phase() {

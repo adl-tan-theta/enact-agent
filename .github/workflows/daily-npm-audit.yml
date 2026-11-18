@@ -1,8 +1,17 @@
 name: Daily npm Audit
 
+# Disabled in the Enact fork.
+#
+# This workflow audits the upstream ZeroClaw web application's npm
+# dependencies. The fork ships the headless agent distribution, whose
+# release archives carry no web application and no npm dependencies, so the
+# audit reports on code this fork does not ship. It fails on every run for
+# that reason.
+#
+# The disposition is explicit rather than silent: if the fork starts
+# shipping the web dashboard again, this workflow must be re-enabled and
+# pointed at the fork's own dependencies.
 on:
-  schedule:
-    - cron: "23 9 * * *"
   workflow_dispatch:
 
 concurrency:

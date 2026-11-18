@@ -312,8 +312,49 @@ detect_target_triple() {
 
 # ── Pre-built binary install ──────────────────────────────────────
 
+# Resolve the newest published Enact Agent distribution tag.
+#
+# The distribution tag is `enact-agent-v<version>`, separate from the upstream
+# `v*` tags, and the assets are named `<tag>-<target>.tar.gz`.
+#
+# The Releases "latest" endpoint only reports non-prerelease, non-draft
+# releases, so it answers 404 whenever the newest publication is a
+# pre-release — and every Enact Agent release so far is one. The releases
+# list is the authority for "newest", so read it directly and take the first
+# `enact-agent-v*` tag it reports.
+resolve_latest_release_tag() {
+  # The releases list reports drafts alongside published releases. A draft is
+  # not yet a distribution, and its assets may still be incomplete, so skip it
+  # and take the newest published `enact-agent-v*` tag.
+  #
+  # The payload is a JSON array of objects whose fields are spread over many
+  # lines, and `tag_name` and `draft` do not sit next to each other. Collapse
+  # each top-level object onto one line, then filter objects rather than
+  # lines. `sed` turns the array into newline-separated objects; the nested
+  # braces inside an object do not matter because only the top-level `tag_name`
+  # and `draft` fields are read.
+  #
+  # An empty result is a normal outcome — a fork with no published release
+  # yet — so every stage of the pipeline tolerates "no match" instead of
+  # aborting the installer.
+  curl -fsSL "https://api.github.com/repos/adl-tan-theta/enact-agent/releases?per_page=100" 2>/dev/null |
+    tr '\n' ' ' |
+    sed 's/},[[:space:]]*{/}\n{/g' |
+    {
+      grep '"tag_name"' || true
+    } |
+    {
+      grep -v '"draft":[[:space:]]*true' || true
+    } |
+    {
+      grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' || true
+    } |
+    head -1 |
+    sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\(enact-agent-v[^"]*\)".*/\1/p'
+}
+
 install_prebuilt() {
-  local triple version asset_name asset_url sha256_url tmp_dir web_data_dir
+  local triple version tag asset_name asset_url sha256_url tmp_dir web_data_dir
   triple=$(detect_target_triple)
 
   if [ -z "$triple" ]; then
@@ -321,25 +362,24 @@ install_prebuilt() {
     return 1
   fi
 
-  # Resolve latest release version via GitHub API
-  version=$(curl -fsSL "https://api.github.com/repos/zeroclaw-labs/zeroclaw/releases/latest" |
-    grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\(.*\)".*/\1/')
+  version=$(resolve_latest_release_tag)
 
   if [ -z "$version" ]; then
     warn "Could not resolve latest release — falling back to source build"
     return 1
   fi
 
-  asset_name="zeroclaw-${triple}.tar.gz"
-  asset_url="https://github.com/zeroclaw-labs/zeroclaw/releases/download/${version}/${asset_name}"
-  sha256_url="https://github.com/zeroclaw-labs/zeroclaw/releases/download/${version}/SHA256SUMS"
+  tag="$version"
+  asset_name="${tag}-${triple}.tar.gz"
+  asset_url="https://github.com/adl-tan-theta/enact-agent/releases/download/${tag}/${asset_name}"
+  sha256_url="https://github.com/adl-tan-theta/enact-agent/releases/download/${tag}/SHA256SUMS-${tag#enact-agent-v}"
 
   echo
-  printf "%s\n" "$(bold "Installing ZeroClaw ${version} (pre-built)")"
+  printf "%s\n" "$(bold "Installing Enact Agent ${tag} (pre-built)")"
   info "Platform: $triple"
   info "Source:   $asset_url"
   info "Channels: pre-built binaries ship the standard distribution channel set; availability is target-specific."
-  info "Run 'zeroclaw channel list' to inspect this binary. For other channels such as Slack, build from source with --preset full."
+  info "Run 'enact-agent channel list' to inspect this binary. For other channels such as Slack, build from source with --preset full."
   echo
 
   # Resolve platform-correct web data directory to match gateway auto-detect
@@ -398,8 +438,25 @@ install_prebuilt() {
 
   tar -xzf "$tmp_dir/$asset_name" -C "$tmp_dir"
   mkdir -p "$CARGO_HOME/bin"
-  install -m 755 "$tmp_dir/zeroclaw" "$CARGO_HOME/bin/zeroclaw"
-  if [ -f "$tmp_dir/$TUI_BIN_NAME" ]; then
+  # The Enact archive unpacks into a directory named after the tag and the
+  # target, and the binary inside it is `enact-agent`. It is installed under
+  # the installer's canonical binary name so that the prebuilt path and the
+  # source path agree on what lands in `$CARGO_HOME/bin`; the release archive
+  # names the binary after the distribution, the install target does not.
+  extracted="$tmp_dir/${tag}-${triple}"
+  if [ -x "$extracted/enact-agent" ]; then
+    install -m 755 "$extracted/enact-agent" "$CARGO_HOME/bin/zeroclaw"
+  elif [ -x "$tmp_dir/enact-agent" ]; then
+    install -m 755 "$tmp_dir/enact-agent" "$CARGO_HOME/bin/zeroclaw"
+  else
+    warn "The archive did not contain an enact-agent binary — falling back to source build"
+    rm -rf "$tmp_dir"
+    trap - EXIT
+    return 1
+  fi
+  if [ -f "$extracted/$TUI_BIN_NAME" ]; then
+    install -m 755 "$extracted/$TUI_BIN_NAME" "$CARGO_HOME/bin/$TUI_BIN_NAME"
+  elif [ -f "$tmp_dir/$TUI_BIN_NAME" ]; then
     install -m 755 "$tmp_dir/$TUI_BIN_NAME" "$CARGO_HOME/bin/$TUI_BIN_NAME"
   fi
 

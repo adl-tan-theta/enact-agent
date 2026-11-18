@@ -1,5 +1,27 @@
 name: Scoop Bucket Canary
 
+# Disabled in the Enact fork.
+#
+# This workflow rehearses the publish path for the upstream `zeroclaw` Scoop
+# bucket, using an account-bound token the fork does not hold.
+#
+# The Enact distribution is not published through Scoop: it ships through the
+# GitHub releases in adl-tan-theta/enact-agent, which the install script and
+# the Homebrew tap point at.
+#
+# The weekly schedule is kept, and the rehearsal still runs, but as a *generic*
+# dry run rather than a credential canary. The credential gate in
+# `scripts/release/scoop_credential_gate.sh` treats a dry run with no bucket
+# repository and no token as a skip, so the weekly run completes cleanly here
+# and says why, rather than failing on a credential the fork will never hold.
+# A red canary would then mean "the credential rotted", when here it would
+# only mean "the fork publishes no bucket".
+#
+# The disposition is explicit rather than silent: if a Scoop bucket is added
+# for the Enact distribution, set `SCOOP_BUCKET_REPO`, add the secret
+# `SCOOP_BUCKET_TOKEN`, and switch `credential_canary` back to `true` to get
+# the credential-rot rehearsal back.
+
 # Rehearses the Scoop publish path against the current stable release without
 # touching the bucket.
 #
@@ -19,8 +41,6 @@ name: Scoop Bucket Canary
 
 on:
   schedule:
-    # Mondays, early UTC: a failure lands at the start of the week rather than
-    # in the middle of a release.
     - cron: "23 7 * * 1"
   workflow_dispatch:
 
@@ -63,6 +83,16 @@ jobs:
     with:
       release_tag: ${{ needs.latest-release.outputs.tag }}
       dry_run: true
-      credential_canary: true
+      # The fork publishes no Scoop bucket, so there is no bucket credential to
+      # rehearse. `scripts/release/scoop_credential_gate.sh` treats a generic
+      # dry run with no bucket repository and no token as a skip, so the
+      # weekly run completes cleanly here and states why, instead of failing
+      # on a credential the fork will never hold.
+      #
+      # When a Scoop bucket is added for the Enact distribution, set the
+      # repository variable `SCOOP_BUCKET_REPO`, add the secret
+      # `SCOOP_BUCKET_TOKEN`, and switch this back to
+      # `credential_canary: true` to get the credential-rot rehearsal.
+      credential_canary: false
     secrets:
       SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
