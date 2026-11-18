@@ -2210,6 +2210,43 @@ def install_enact_hook_wit(source):
         shutil.copy2(overlay_wit, target_wit)
 
 
+def project_enact_hook_wit_input_inventory(source):
+    """Add the fork's hook interface to the namespace test's input inventory.
+
+    The `late_tool_search` cases bind themselves to the exact set of source
+    inputs the fixture was built from: the receipt lists them, and the test
+    asserts that the list is exactly `expected_inputs`. That is what stops a
+    stale or substituted fixture from being accepted.
+
+    The fork installs `wit/v0/hook.wit` for its plugin-hook capability, so
+    the prepared tree carries one more WIT interface than upstream's
+    inventory names. Without this projection the prepared tree has an input
+    the inventory does not list, the length assertion fails, and the
+    namespace cases fail before they test anything.
+
+    This belongs in the overlay and not in the tracked source. The tracked
+    tree has no `wit/v0/hook.wit` -- the interface is installed by the
+    overlay -- so listing it there would make the tracked tree's own
+    inventory one longer than the tree it describes. The Quality Gate
+    compiles the tracked tree, and the prepared tree is what the fork
+    ships.
+
+    The name is anchored so upstream drift is a loud error rather than a
+    silent mismatch, and the entry is guarded so it cannot be listed
+    twice.
+    """
+    tests = source / "crates/zeroclaw-runtime/src/tools/r5_namespace_tests.rs"
+    entry = '        "wit/v0/hook.wit",\n'
+    if entry in tests.read_text():
+        raise RuntimeError(
+            "Upstream overlay drift: the hook interface is already listed in "
+            f"{tests}"
+        )
+    old = '        "wit/v0/README.md",\n        "wit/v0/channel.wit",\n'
+    new = '        "wit/v0/README.md",\n        "wit/v0/channel.wit",\n' + entry
+    replace_required(tests, old, new)
+
+
 def manifest():
     brand = json.loads((ROOT / "overlays/enact/brand.json").read_text())
     if not re.fullmatch(r"[a-z][a-z0-9-]*", brand["command"]):
@@ -7377,6 +7414,10 @@ def project_enact_plugin_hooks(source):
 
     # ── the interface definition ────────────────────────────────────────
     install_enact_hook_wit(source)
+
+    # The namespace test binds itself to the fixture's input inventory, so
+    # the hook interface has to be listed there too.
+    project_enact_hook_wit_input_inventory(source)
 
     # The namespace test binds itself to the fixture's input inventory, so
     # the hook interface has to be listed there too.
