@@ -1,0 +1,13 @@
+name: Wf Probe
+on:
+  push:
+    branches: [enact/branding]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 2
+    steps:
+      - run: echo probe
