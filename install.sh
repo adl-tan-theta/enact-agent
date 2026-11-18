@@ -312,6 +312,47 @@ detect_target_triple() {
 
 # ── Pre-built binary install ──────────────────────────────────────
 
+# Resolve the newest published Enact Agent distribution tag.
+#
+# The distribution tag is `enact-agent-v<version>`, separate from the upstream
+# `v*` tags, and the assets are named `<tag>-<target>.tar.gz`.
+#
+# The Releases "latest" endpoint only reports non-prerelease, non-draft
+# releases, so it answers 404 whenever the newest publication is a
+# pre-release — and every Enact Agent release so far is one. The releases
+# list is the authority for "newest", so read it directly and take the first
+# `enact-agent-v*` tag it reports.
+resolve_latest_release_tag() {
+  # The releases list reports drafts alongside published releases. A draft is
+  # not yet a distribution, and its assets may still be incomplete, so skip it
+  # and take the newest published `enact-agent-v*` tag.
+  #
+  # The payload is a JSON array of objects whose fields are spread over many
+  # lines, and `tag_name` and `draft` do not sit next to each other. Collapse
+  # each top-level object onto one line, then filter objects rather than
+  # lines. `sed` turns the array into newline-separated objects; the nested
+  # braces inside an object do not matter because only the top-level `tag_name`
+  # and `draft` fields are read.
+  #
+  # An empty result is a normal outcome — a fork with no published release
+  # yet — so every stage of the pipeline tolerates "no match" instead of
+  # aborting the installer.
+  curl -fsSL "https://api.github.com/repos/adl-tan-theta/enact-agent/releases?per_page=100" 2>/dev/null |
+    tr '\n' ' ' |
+    sed 's/},[[:space:]]*{/}\n{/g' |
+    {
+      grep '"tag_name"' || true
+    } |
+    {
+      grep -v '"draft":[[:space:]]*true' || true
+    } |
+    {
+      grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' || true
+    } |
+    head -1 |
+    sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\(enact-agent-v[^"]*\)".*/\1/p'
+}
+
 install_prebuilt() {
   local triple version tag asset_name asset_url sha256_url tmp_dir web_data_dir
   triple=$(detect_target_triple)
@@ -321,11 +362,7 @@ install_prebuilt() {
     return 1
   fi
 
-  # Resolve the latest Enact-branded release. The distribution tag is
-  # `enact-agent-v<version>`, separate from the upstream `v*` tags, and the
-  # assets are named `<tag>-<target>.tar.gz`.
-  version=$(curl -fsSL "https://api.github.com/repos/adl-tan-theta/enact-agent/releases/latest" |
-    grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\(enact-agent-v[^"]*\)".*/\1/')
+  version=$(resolve_latest_release_tag)
 
   if [ -z "$version" ]; then
     warn "Could not resolve latest release — falling back to source build"

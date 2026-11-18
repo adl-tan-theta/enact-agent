@@ -100,9 +100,17 @@ cat >"$fixture/tools/curl" <<'EOF'
 # The Enact fork resolves its own releases: the repository is
 # adl-tan-theta/enact-agent, the tag is `enact-agent-v<version>`, the asset is
 # `<tag>-<target>.tar.gz` and the checksum file is `SHA256SUMS-<version>`.
+#
+# The installer reads the releases *list*, not the "latest" endpoint: the
+# latter omits pre-releases, and every Enact Agent release is one. The fixture
+# returns the same shape the API does, with the fields spread over separate
+# lines and `tag_name` ahead of `draft`.
 case "$*" in
-  '-fsSL https://api.github.com/repos/adl-tan-theta/enact-agent/releases/latest')
-    echo '{"tag_name": "enact-agent-v0.8.7"}' ;;
+  '-fsSL https://api.github.com/repos/adl-tan-theta/enact-agent/releases?per_page=100')
+    printf '[\n  {\n    "url": "https://api.github.com/repos/adl-tan-theta/enact-agent/releases/1",\n'
+    printf '    "tag_name": "enact-agent-v0.8.7",\n'
+    printf '    "draft": false,\n'
+    printf '    "prerelease": true\n  }\n]\n' ;;
   '-fsSL https://github.com/adl-tan-theta/enact-agent/releases/download/enact-agent-v0.8.7/SHA256SUMS-0.8.7 -o '*)
     cp "$FIXTURE_ROOT/SHA256SUMS" "$4" ;;
   '-fSL --progress-bar https://github.com/adl-tan-theta/enact-agent/releases/download/enact-agent-v0.8.7/enact-agent-v0.8.7-x86_64-unknown-linux-gnu.tar.gz -o '*)
