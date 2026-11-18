@@ -185,10 +185,16 @@ jobs:
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: |
           set -euo pipefail
-          # `build.py` requires `origin` to be the upstream repository, because
-          # it treats upstream as the source of the prepared tree. The fork's
-          # own remote is kept under `enact` so the release still records where
-          # it came from.
+          # `build.py` requires `origin` to name the upstream repository, which
+          # is the fork's documented remote layout (`origin` = upstream,
+          # `enact` = this fork; see overlays/enact/AGENTS.md). The rename
+          # keeps the fork's own remote under `enact` so the release still
+          # records where it came from.
+          #
+          # No upstream code is fetched: `build.py prepare` archives this
+          # repository's own commit and applies the overlay projections under
+          # `overlays/enact/`. The remote only has to satisfy the provenance
+          # check.
           git remote rename origin enact
           git remote add origin https://github.com/zeroclaw-labs/zeroclaw.git
           python_bin="$(command -v python)"
