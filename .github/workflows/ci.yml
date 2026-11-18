@@ -8,8 +8,8 @@ on:
   merge_group:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-v2
+  cancel-in-progress: true
 
 permissions:
   contents: read
