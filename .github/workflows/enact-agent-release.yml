@@ -238,7 +238,12 @@ jobs:
           archives=("$output"/*.tar.gz)
           test "${#archives[@]}" -eq 1
           archive_name="$(basename "${archives[0]}")"
-          test "$archive_name" = "${RELEASE_TAG}-"*.tar.gz
+          # `case` matches the pattern; `test =` compares literal strings and
+          # would never match a glob.
+          case "$archive_name" in
+            "${RELEASE_TAG}-"*.tar.gz) ;;
+            *) echo "::error::Archive ${archive_name} is not named after ${RELEASE_TAG}." >&2; exit 1 ;;
+          esac
           test -f "$output/SHA256SUMS"
 
           # The overlay writes the checksum file as `SHA256SUMS`. Every build
