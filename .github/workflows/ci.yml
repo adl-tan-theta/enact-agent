@@ -1310,6 +1310,17 @@ jobs:
         run: bash scripts/ci/apt_install.sh mold expect python3
       - name: Install cargo-nextest
         run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin
+      # Upstream's fleet has no PowerShell, so the Windows-only PowerShell
+      # tests skip themselves there. The GitHub-hosted Ubuntu image ships a
+      # PowerShell, and on 2026-11-18 the copy it shipped was broken:
+      # `pwsh -NoProfile -Command "exit 0"` succeeded -- which is all the
+      # test's probe checks -- while a real script died with a .NET assembly
+      # error, and three PowerShell tests failed for a reason that had
+      # nothing to do with the code. The guard shadows an interpreter that
+      # cannot execute a script, so the tests skip themselves exactly as they
+      # do upstream.
+      - name: Shadow a broken PowerShell interpreter
+        run: bash scripts/ci/powershell_interpreter_guard.sh
       - name: Run tests
         run: cargo nextest run --locked --workspace --exclude zeroclaw-desktop
         env:
