@@ -572,7 +572,17 @@ jobs:
             cache-key: plugins-cranelift-runtime
             # Six serial test steps. Warm-cache runs reached 18-20 minutes
             # and hit the shared 20-minute limit (#10558).
-            timeout-minutes: 30
+            #
+            # Upstream raised that to 30 for an 8-vCPU Blacksmith runner. This
+            # fork runs the leg on GitHub-hosted `ubuntu-24.04` -- 4 vCPU --
+            # and run 44354465808 measured what that costs: the plugin
+            # admission step took 5m22s and every step before it passed, but
+            # the job was killed in the root CLI plugin tests with about seven
+            # minutes still to run. It needed roughly 37.
+            #
+            # 45 leaves the compile and the six serial steps room on the
+            # runner this fork actually has.
+            timeout-minutes: 45
           - name: plugins pulley backend
             features: plugins-wasm-pulley
             suite: check
