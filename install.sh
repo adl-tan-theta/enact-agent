@@ -402,12 +402,15 @@ install_prebuilt() {
   tar -xzf "$tmp_dir/$asset_name" -C "$tmp_dir"
   mkdir -p "$CARGO_HOME/bin"
   # The Enact archive unpacks into a directory named after the tag and the
-  # target; the binary inside it is `enact-agent`.
+  # target, and the binary inside it is `enact-agent`. It is installed under
+  # the installer's canonical binary name so that the prebuilt path and the
+  # source path agree on what lands in `$CARGO_HOME/bin`; the release archive
+  # names the binary after the distribution, the install target does not.
   extracted="$tmp_dir/${tag}-${triple}"
   if [ -x "$extracted/enact-agent" ]; then
-    install -m 755 "$extracted/enact-agent" "$CARGO_HOME/bin/enact-agent"
+    install -m 755 "$extracted/enact-agent" "$CARGO_HOME/bin/zeroclaw"
   elif [ -x "$tmp_dir/enact-agent" ]; then
-    install -m 755 "$tmp_dir/enact-agent" "$CARGO_HOME/bin/enact-agent"
+    install -m 755 "$tmp_dir/enact-agent" "$CARGO_HOME/bin/zeroclaw"
   else
     warn "The archive did not contain an enact-agent binary — falling back to source build"
     rm -rf "$tmp_dir"
