@@ -162,6 +162,49 @@ class ExcludedMemoryProjectionTests(unittest.TestCase):
         self.assertIn("exclude_memory: memory_free", delegate)
 
 
+class NamespaceCaseProjectionTests(unittest.TestCase):
+    """The namespace cases must stay bound to this fork's tree and runner.
+
+    The `late_tool_search` cases bind themselves to the exact source inputs
+    the fixture was built from, and they wait for a cooperative handshake
+    with a deadline. Both are calibrated against upstream's environment, so
+    the fork has to adjust them or the cases fail for reasons that have
+    nothing to do with the code.
+    """
+
+    def test_hook_interface_is_listed_in_the_input_inventory(self):
+        tests = build.SOURCE / "crates/zeroclaw-runtime/src/tools/r5_namespace_tests.rs"
+        text = tests.read_text()
+        # The fork installs the hook interface; the inventory has to name it
+        # or the length assertion rejects the receipt before any case runs.
+        self.assertEqual(text.count('        "wit/v0/hook.wit",\n'), 1)
+        # The inventory stays sorted, so the entry sits where it belongs.
+        self.assertLess(
+            text.index('        "wit/v0/hook.wit",\n'),
+            text.index('        "wit/v0/inbound.wit",\n'),
+        )
+
+    def test_case_deadline_is_wide_enough_for_a_loaded_hosted_runner(self):
+        tests = build.SOURCE / "crates/zeroclaw-runtime/src/tools/r5_namespace_tests.rs"
+        text = tests.read_text()
+        self.assertIn("std::time::Duration::from_secs(180)", text)
+        self.assertNotIn("std::time::Duration::from_secs(45)", text)
+
+    def test_deadline_projection_refuses_to_run_twice(self):
+        # The deadline projection anchors on upstream's own text, so a second
+        # application has nothing to replace and must fail loudly rather
+        # than silently doing nothing.
+        with self.assertRaises(RuntimeError):
+            build.project_enact_namespace_case_deadline(build.SOURCE)
+
+    def test_inventory_projection_refuses_to_run_twice(self):
+        # The inventory projection guards itself: applying it twice would
+        # list the hook interface twice, and the length assertion in the
+        # test rejects a duplicated entry just as surely as a missing one.
+        with self.assertRaises(RuntimeError):
+            build.project_enact_hook_wit_input_inventory(build.SOURCE)
+
+
 class RelayDialProjectionTests(unittest.TestCase):
     def test_dial_cancellation_uses_a_deterministic_pending_connector(self):
         with tempfile.TemporaryDirectory() as name:

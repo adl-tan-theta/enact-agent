@@ -1342,6 +1342,26 @@ jobs:
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+          # The Bedrock provider has its own client for the EC2 instance
+          # metadata service at 169.254.169.254, and
+          # `bedrock::tests::chat_fails_without_credentials` asserts that a
+          # request with no credentials fails on the missing credential rather
+          # than on anything else.
+          #
+          # On a machine with no metadata service that is what happens: the
+          # provider cannot resolve a credential and the test sees a
+          # missing-credentials error. A GitHub-hosted runner is an Azure VM
+          # with that address reachable, so the provider gets a response it
+          # cannot parse and the test fails with "error decoding response
+          # body" instead. Upstream never sees this because its fleet runs on
+          # Blacksmith, where the address is not reachable.
+          #
+          # Disabling the metadata source puts the runner back on the
+          # behaviour every other machine has, so the test measures what it
+          # is meant to measure. It is scoped to this job: it changes how the
+          # AWS SDK resolves credentials for the test run, and nothing in the
+          # product is asked to talk to Bedrock from CI.
+          AWS_EC2_METADATA_DISABLED: "true"
       # The crate's default feature set excludes the host-side hardware
       # modules. Compile-only `ci-all` coverage cannot exercise their process,
       # timeout, cleanup, and validation regressions.

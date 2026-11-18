@@ -2210,6 +2210,75 @@ def install_enact_hook_wit(source):
         shutil.copy2(overlay_wit, target_wit)
 
 
+def project_enact_hook_wit_input_inventory(source):
+    """Add the fork's hook interface to the namespace test's input inventory.
+
+    The `late_tool_search` tests bind themselves to the exact set of source
+    inputs the fixture was built from: the receipt lists them, and the test
+    asserts that the list is exactly `expected_inputs`. That is what stops a
+    stale or substituted fixture from being accepted.
+
+    The fork installs `wit/v0/hook.wit` for its plugin-hook capability, so the
+    prepared tree carries one more WIT interface than upstream's inventory
+    names. Without this projection the prepared tree has an input the
+    inventory does not list, the length assertion fails, and all twenty-three
+    `late_tool_search` tests fail before they test anything.
+
+    The name is anchored so upstream drift is a loud error rather than a
+    silent mismatch.
+    """
+    tests = source / "crates/zeroclaw-runtime/src/tools/r5_namespace_tests.rs"
+    entry = '        "wit/v0/hook.wit",\n'
+    # Applying this twice would list the hook interface twice, and the
+    # length assertion in the test rejects a receipt with a duplicated entry
+    # just as surely as it rejects a missing one. The anchor below still
+    # matches after the first application, so the guard is explicit.
+    if entry in tests.read_text():
+        raise RuntimeError(
+            "Upstream overlay drift: the hook interface is already listed in "
+            f"{tests}"
+        )
+    old = '        "wit/v0/README.md",\n        "wit/v0/channel.wit",\n'
+    new = '        "wit/v0/README.md",\n        "wit/v0/channel.wit",\n' + entry
+    replace_required(tests, old, new)
+
+
+def project_enact_namespace_case_deadline(source):
+    """Give the namespace cases room to finish on this fork's hosted runners.
+
+    The `late_tool_search` cases drive a real MCP guest over a real WIT
+    boundary and wait for a cooperative handshake. Upstream gives each case
+    45 seconds, measured on an 8-vCPU Blacksmith runner.
+
+    This fork runs the same job on GitHub-hosted `ubuntu-24.04` -- 4 vCPU,
+    shared with the rest of the gate's fleet -- so the handshake needs more
+    wall clock. Run 44317293992 measured it at the limit: 63 of the 66 cases
+    passed and the three that spawn an MCP server with a skill pipeline
+    failed with "late ToolSearch cooperative case deadline expired".
+
+    The same selection passes locally in 93 seconds for all 66, so the
+    behaviour is correct and only the budget was too small for the runner.
+    The deadline is raised rather than the case being weakened: it still
+    fails a case that genuinely hangs, just with enough room for a loaded
+    machine to reach the handshake.
+
+    The duration is anchored so upstream drift is a loud error rather than a
+    silent mismatch.
+    """
+    tests = source / "crates/zeroclaw-runtime/src/tools/r5_namespace_tests.rs"
+    old = """        tokio::time::timeout(
+            std::time::Duration::from_secs(45),
+            std::panic::AssertUnwindSafe(body_future).catch_unwind(),
+        )
+"""
+    new = """        tokio::time::timeout(
+            std::time::Duration::from_secs(180),
+            std::panic::AssertUnwindSafe(body_future).catch_unwind(),
+        )
+"""
+    replace_required(tests, old, new)
+
+
 def manifest():
     brand = json.loads((ROOT / "overlays/enact/brand.json").read_text())
     if not re.fullmatch(r"[a-z][a-z0-9-]*", brand["command"]):
@@ -7377,6 +7446,11 @@ def project_enact_plugin_hooks(source):
 
     # ── the interface definition ────────────────────────────────────────
     install_enact_hook_wit(source)
+
+    # The namespace test binds itself to the fixture's input inventory, so
+    # the hook interface has to be listed there too.
+    project_enact_hook_wit_input_inventory(source)
+    project_enact_namespace_case_deadline(source)
 
 def project_enact_builtin_selection_fixture(source):
     """Keep the builtin-selection fixture in step with the shipped registry.
