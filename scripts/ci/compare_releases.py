@@ -12,7 +12,7 @@ than silently reporting "no change".
 Usage:
     compare_releases.py OLD_MANIFEST NEW_MANIFEST
     compare_releases.py --old-tag enact-agent-v0.9.0-enact.1 \
-                         --new-tag enact-agent-v0.9.0-enact.4
+                         --new-tag enact-agent-v0.9.0-enact.5
 
 The `--old-tag` / `--new-tag` form downloads the archives from the fork's
 GitHub Releases and extracts the manifests. The contract for the new build
@@ -202,7 +202,7 @@ def main() -> int:
     parser.add_argument("old_manifest", nargs="?", type=Path, help="path to the old manifest.json")
     parser.add_argument("new_manifest", nargs="?", type=Path, help="path to the new manifest.json")
     parser.add_argument("--old-tag", help="old release tag, e.g. enact-agent-v0.9.0-enact.1")
-    parser.add_argument("--new-tag", help="new release tag, e.g. enact-agent-v0.9.0-enact.4")
+    parser.add_argument("--new-tag", help="new release tag, e.g. enact-agent-v0.9.0-enact.5")
     parser.add_argument(
         "--target",
         default="aarch64-apple-darwin",
