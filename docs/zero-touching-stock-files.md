@@ -1,4 +1,59 @@
-# Scope: zero touching of stock files
+# Zero touching of stock files — implemented
+
+**Status: complete.** Zero upstream-owned files differ from the pinned base.
+The acceptance criterion holds:
+
+```sh
+git diff --exit-code "$upstream_base" -- . ':(exclude)overlays/'
+```
+
+Every upstream-owned file is byte-identical to upstream. The fork's text
+lives only in `overlays/enact/` and in the ephemeral prepared tree.
+
+## What was actually done
+
+| Area | Mechanism | Result |
+| --- | --- | --- |
+| `web/` (16 stock files) | `project_enact_web_branding` projection | prepared tree carries the branding |
+| `web/` fork sources (8 files) | overlay file store | not tracked at all |
+| `install.sh` | overlay file store | prepared tree ships the fork's installer |
+| `tests/architecture/*` (2) + `tests/test_architecture.rs` | overlay file store | prepared tree runs the fork's gates |
+| `docs/book/src/SUMMARY.md` + `ci-and-actions.md` | overlay file store | prepared tree carries the fork's book |
+| `deny.toml` | `overlays/enact/deny.toml` + `cargo deny --config` | stock file untouched |
+| `nix/web.nix` | projection | prepared tree carries the brand copy |
+| `AGENTS.md` | restored to stock | the fork's contract lives in `overlays/enact/AGENTS.md` |
+| `.github/workflows/` (9 stock) | fork-owned workflow twins | stock files untouched |
+| `scripts/ci/` (5 stock) | fork-owned copies under `scripts/ci/enact/` | stock files untouched |
+
+## Two findings that changed the design
+
+1. **`xtask` needs no change.** `repo_root()` is `CARGO_MANIFEST_DIR/..`, a
+   *compile-time* constant. Building `cargo web` from the prepared tree makes
+   it target the prepared tree. No stock build tool is touched.
+2. **The gateway needed a recursion limit.** Evaluating the `Send` bound on
+   hyper's error type needs more depth than the default allows once the
+   fork's tool surface is in the graph. This was a pre-existing latent
+   failure — the original branch's prepared tree failed the same way — and it
+   blocked `cargo web gen-api`, and so the whole web pipeline.
+
+## Validation
+
+| Check | Result |
+| --- | --- |
+| zero-drift gate | **0** upstream-owned deltas |
+| `overlays/enact` tests | **77** passed |
+| `cargo deny --config overlays/enact/deny.toml check` | advisories, bans, licenses, sources **ok** |
+| `cargo generate installers --check` | **22** surfaces in sync, against the stock installer |
+| prepared-tree architecture tests | **102** passed (the fork's gates) |
+| tracked-tree architecture tests | **90** passed (the stock gates) |
+| prepared-tree clippy | **0** errors |
+| prepared-tree fmt | clean |
+| prepared-tree web | tsc clean, branding tests 3/3, bundle builds |
+| CI script tests | **26** passed |
+
+---
+
+# Original scope
 
 **Goal:** every file `origin/master` owns is byte-identical to upstream in
 `enact/branding`. Zero exceptions. The fork's text lives only in
