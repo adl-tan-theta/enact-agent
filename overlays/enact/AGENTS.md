@@ -111,8 +111,10 @@ the repository from the `origin` remote otherwise, which is upstream.
 Release `0.8.7-enact.1` has qualified native archives for:
 
 - Apple Silicon macOS: `aarch64-apple-darwin`.
-- Intel macOS: `x86_64-apple-darwin`.
 - Linux x64: `x86_64-unknown-linux-gnu`.
+
+There is no Intel macOS archive: the fork does not ship one, so the installer
+resolves no Intel target and an Intel Mac falls back to a source build.
 
 All three use fork source `c99096a8b9e8c50726b72a032553f7727babfa6c` on upstream
 base `1c1cd118ac536a1dd1bc79b9cce69cbdc04e4f29` and passed native
@@ -127,7 +129,6 @@ download directory; stop on any download, extraction or checksum failure.
 set -eu
 case "$(uname -s):$(uname -m)" in
   Darwin:arm64) target=aarch64-apple-darwin ;;
-  Darwin:x86_64) target=x86_64-apple-darwin ;;
   Linux:x86_64) target=x86_64-unknown-linux-gnu ;;
   *) printf '%s\n' 'No qualified archive for this operating system/CPU.' >&2; exit 1 ;;
 esac

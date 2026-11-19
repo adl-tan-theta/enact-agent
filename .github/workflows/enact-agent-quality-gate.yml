@@ -1371,7 +1371,12 @@ jobs:
       - name: Shadow a broken PowerShell interpreter
         run: bash scripts/ci/powershell_interpreter_guard.sh
       - name: Run tests
-        run: cargo nextest run --locked --workspace --exclude zeroclaw-desktop
+        # The prepared tree, not the tracked tree. The tracked tree is
+        # upstream's bytes, so it carries upstream's behaviour; the prepared
+        # tree is what the release ships, and it is where the fork's
+        # overlays apply -- including the Bedrock provider's
+        # metadata-service opt-out, which this job depends on below.
+        run: bash scripts/ci/enact/run_workspace_tests.sh
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -1388,10 +1393,12 @@ jobs:
           #
           # The flag is what the AWS SDKs read to skip the metadata service,
           # and the fork's overlay makes the provider's own client honour it
-          # too. With it set the runner behaves like every other machine:
-          # the credential cannot be resolved, and the test measures what it
-          # is meant to measure. It is scoped to this job -- nothing in the
-          # product is asked to talk to Bedrock from CI.
+          # too. The tests run against the prepared tree, where that overlay
+          # applies, so the flag has something to switch off. With it set the
+          # runner behaves like every other machine: the credential cannot be
+          # resolved, and the test measures what it is meant to measure. It
+          # is scoped to this job -- nothing in the product is asked to talk
+          # to Bedrock from CI.
           AWS_EC2_METADATA_DISABLED: "true"
       # The crate's default feature set excludes the host-side hardware
       # modules. Compile-only `ci-all` coverage cannot exercise their process,
@@ -1780,7 +1787,15 @@ jobs:
       - name: Validate scoped lru advisory exception
         run: python3 scripts/ci/lru_advisory_scope_test.py
       - name: Check licenses, sources, and advisories
-        run: cargo deny check --config overlays/enact/deny.toml
+        # `--config` moved between cargo-deny versions: 0.19 carries it on
+        # the `check` subcommand and 0.20 on the top-level command. The CI
+        # pins 0.19, but the form is chosen from the installed binary.
+        run: |
+          if cargo deny check --help 2>&1 | grep -q -- "--config"; then
+            cargo deny check --config overlays/enact/deny.toml
+          else
+            cargo deny --config overlays/enact/deny.toml check
+          fi
       - name: Lockfile integrity
         run: cargo verify-project && cargo fetch --locked
 
@@ -1807,8 +1822,8 @@ jobs:
         run: |
           curl -LsSf https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz \
             | tar zxf - -C ~/.cargo/bin --strip-components=1
-      - name: Run cargo audit (RustSec advisory database)
-        run: cargo audit
+      - name: Run the fork's advisory scan (RustSec advisory database)
+        run: bash scripts/ci/enact/advisory_scan.sh
 
   # Detect non-Rust job families a PR touches,
   # so unrelated PRs do not pay for them. Cheap and always-on; forces every

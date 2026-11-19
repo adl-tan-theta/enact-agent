@@ -275,15 +275,20 @@ detect_target_triple() {
 
   case "$os" in
   Darwin)
-    # Apple Silicon reports arm64; Intel reports x86_64. A Rosetta-translated
-    # shell on Apple Silicon also reports x86_64 from `uname -m`, so consult
-    # `sysctl hw.optional.arm64` to recover the true CPU. Without this an Intel
-    # Mac (or an M-series Mac run under Rosetta) is handed the wrong-arch
-    # binary and hits "bad CPU type in executable".
+    # The distribution ships the Apple Silicon build. Apple Silicon reports
+    # arm64; Intel reports x86_64. A Rosetta-translated shell on Apple
+    # Silicon also reports x86_64 from `uname -m`, so consult
+    # `sysctl hw.optional.arm64` to recover the true CPU. Without this an
+    # M-series Mac run under Rosetta is handed the wrong-arch binary and hits
+    # "bad CPU type in executable".
+    #
+    # There is no Intel macOS build: the fork does not ship one, so an Intel
+    # Mac has no asset to fetch and says so rather than resolving a target
+    # whose archive does not exist.
     if [ "$arch" = "arm64" ] || [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ]; then
       echo "aarch64-apple-darwin"
     else
-      echo "x86_64-apple-darwin"
+      echo ""
     fi
     ;;
   Linux)

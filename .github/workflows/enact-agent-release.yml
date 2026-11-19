@@ -112,10 +112,10 @@ jobs:
       fail-fast: false
       matrix:
         # The distribution ships the three targets `install.sh` can resolve:
-        # Apple Silicon macOS, Intel macOS and x86_64 Linux. Each runner builds
+        # Apple Silicon macOS and x86_64 Linux. Each runner builds
         # for its own host triple, and `build.py` names the archive after the
         # target it detects.
-        os: [ubuntu-22.04, macos-15-intel, macos-15]
+        os: [ubuntu-22.04, macos-15]
     env:
       SCCACHE_BASEDIRS: ${{ github.workspace }}
       SCCACHE_IDLE_TIMEOUT: '0'
@@ -369,13 +369,12 @@ jobs:
           cat > release-notes.md <<EOF
           ## Enact Agent ${RELEASE_VERSION}
 
-          Pre-built native binaries for Apple Silicon macOS, Intel macOS and
-          x86_64 Linux.
+          Pre-built native binaries for Apple Silicon macOS and x86_64
+          Linux.
 
           | Platform | Asset |
           | --- | --- |
           | aarch64-apple-darwin | \`${RELEASE_TAG}-aarch64-apple-darwin.tar.gz\` |
-          | x86_64-apple-darwin | \`${RELEASE_TAG}-x86_64-apple-darwin.tar.gz\` |
           | x86_64-unknown-linux-gnu | \`${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz\` |
 
           Verify a download against \`SHA256SUMS-${RELEASE_VERSION}\`:
@@ -432,7 +431,6 @@ jobs:
 
           for asset in \
             "${RELEASE_TAG}-aarch64-apple-darwin.tar.gz" \
-            "${RELEASE_TAG}-x86_64-apple-darwin.tar.gz" \
             "${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz" \
             "SHA256SUMS-${RELEASE_VERSION}"; do
             gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" \

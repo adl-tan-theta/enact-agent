@@ -153,9 +153,11 @@ fn the_release_workflow_publishes_the_distribution_as_latest() {
 fn the_release_workflow_builds_every_target_the_installer_resolves() {
     let workflow = release_workflow();
 
+    // The fork ships the Apple Silicon build and the Linux x86_64 build.
+    // There is no Intel macOS build, so the installer resolves no Intel
+    // target and the release publishes no Intel archive.
     for target in [
         "aarch64-apple-darwin",
-        "x86_64-apple-darwin",
         "x86_64-unknown-linux-gnu",
     ] {
         assert!(

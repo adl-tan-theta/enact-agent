@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-15-intel, macos-15]
+        os: [ubuntu-22.04, macos-15]
     # The `runner` context is not available in a job-level `env:` block — the
     # workflow file is rejected outright when it appears there — so the
     # server socket path is set per step instead. `github.workspace` is

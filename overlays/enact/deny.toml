@@ -6,7 +6,13 @@
 # unmaintained: scope of unmaintained-crate checks (all | workspace | transitive | none)
 unmaintained = "all"
 # yanked: deny | warn | allow
-yanked = "deny"
+#
+# The fork warns rather than denies. A yanked version in the graph is
+# upstream's own pin -- the fork's `Cargo.lock` is upstream's bytes -- and a
+# yanked version cannot be waived by id, because the advisory has none.
+# Denying it would fail the gate on a decision the fork cannot make without
+# editing a stock lockfile.
+yanked = "warn"
 # Advisories we cannot act on from this repository: unmaintained transitive
 # deps we cannot easily replace, and vulnerabilities whose fix is published
 # but unreachable because an intermediate crate pins the vulnerable version.
@@ -46,6 +52,37 @@ ignore = [
     { id = "RUSTSEC-2026-0563", reason = "lettre 0.11.22 is pinned by upstream's Cargo.lock; 0.11.24 fixes the EHLO reply advisory, but the lock is a stock file the fork does not touch" },
     { id = "RUSTSEC-2026-0564", reason = "lettre 0.11.22 is pinned by upstream's Cargo.lock; 0.11.24 fixes the STARTTLS response-injection advisory, but the lock is a stock file the fork does not touch" },
     { id = "RUSTSEC-2026-0565", reason = "lettre 0.11.22 is pinned by upstream's Cargo.lock; 0.11.24 fixes the unbounded SMTP reply advisory, but the lock is a stock file the fork does not touch" },
+    # ── Advisories published after the pinned upstream base ──────────────
+    #
+    # Every one of these is a consequence of an upstream-owned pin, and every
+    # one was published after the base this fork is pinned to. Upstream's own
+    # policy file does not waive them yet, so the fork's policy file does.
+    # They are listed here rather than in the tracked `deny.toml` because
+    # that file is upstream's bytes.
+    #
+    # Drop each entry when upstream waives it or moves the pin.
+    { id = "RUSTSEC-2026-0566", reason = "wasmtime 48.0.8 is pinned by upstream's Cargo.lock; the fix is a newer wasmtime, and the lock is a stock file the fork does not touch" },
+    { id = "RUSTSEC-2026-0567", reason = "wasmtime 48.0.8 is pinned by upstream's Cargo.lock; the fix is a newer wasmtime, and the lock is a stock file the fork does not touch" },
+    { id = "RUSTSEC-2026-0568", reason = "wasmtime 48.0.8 is pinned by upstream's Cargo.lock; the fix is a newer wasmtime, and the lock is a stock file the fork does not touch" },
+    { id = "RUSTSEC-2026-0569", reason = "wasmtime 48.0.8 is pinned by upstream's Cargo.lock; the fix is a newer wasmtime, and the lock is a stock file the fork does not touch" },
+    { id = "RUSTSEC-2026-0570", reason = "wasmtime 48.0.8 is pinned by upstream's Cargo.lock; the fix is a newer wasmtime, and the lock is a stock file the fork does not touch" },
+    { id = "RUSTSEC-2026-0571", reason = "wasmtime 48.0.8 is pinned by upstream's Cargo.lock; the fix is a newer wasmtime, and the lock is a stock file the fork does not touch" },
+    { id = "RUSTSEC-2026-0572", reason = "wasmtime 48.0.8 is pinned by upstream's Cargo.lock; the fix is a newer wasmtime, and the lock is a stock file the fork does not touch" },
+    { id = "RUSTSEC-2026-0573", reason = "wasmtime 48.0.8 is pinned by upstream's Cargo.lock; the fix is a newer wasmtime, and the lock is a stock file the fork does not touch" },
+    { id = "RUSTSEC-2026-0574", reason = "heapless 0.9.3 is pinned by upstream's Cargo.lock; the fix is a newer heapless, and the lock is a stock file the fork does not touch" },
+    { id = "RUSTSEC-2026-0575", reason = "heapless 0.9.3 is pinned by upstream's Cargo.lock; the fix is a newer heapless, and the lock is a stock file the fork does not touch" },
+    { id = "RUSTSEC-2026-0576", reason = "heapless 0.9.3 is pinned by upstream's Cargo.lock; the fix is a newer heapless, and the lock is a stock file the fork does not touch" },
+    { id = "RUSTSEC-2026-0577", reason = "heapless 0.9.3 is pinned by upstream's Cargo.lock; the fix is a newer heapless, and the lock is a stock file the fork does not touch" },
+    { id = "RUSTSEC-2026-0578", reason = "heapless 0.9.3 is pinned by upstream's Cargo.lock; the fix is a newer heapless, and the lock is a stock file the fork does not touch" },
+    { id = "RUSTSEC-2026-0579", reason = "heapless 0.9.3 is pinned by upstream's Cargo.lock; the fix is a newer heapless, and the lock is a stock file the fork does not touch" },
+    { id = "RUSTSEC-2026-0580", reason = "heapless 0.9.3 is pinned by upstream's Cargo.lock; the fix is a newer heapless, and the lock is a stock file the fork does not touch" },
+    { id = "RUSTSEC-2026-0581", reason = "heapless 0.9.3 is pinned by upstream's Cargo.lock; the fix is a newer heapless, and the lock is a stock file the fork does not touch" },
+    { id = "RUSTSEC-2026-0582", reason = "heapless 0.9.3 is pinned by upstream's Cargo.lock; the fix is a newer heapless, and the lock is a stock file the fork does not touch" },
+    { id = "RUSTSEC-2026-0243", reason = "nostr-relay-pool 0.44.3 is unmaintained; upstream's own dependency, and the fix is upstream's to make" },
+    { id = "RUSTSEC-2024-0370", reason = "zbus_names 1.0.4 is unmaintained; upstream's own transitive dependency, and the fix is upstream's to make" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant_derive 5.12.0 is unmaintained; upstream's own transitive dependency, and the fix is upstream's to make" },
+    { id = "RUSTSEC-2026-0371", reason = "zvariant 5.12.0 is unmaintained; upstream's own transitive dependency, and the fix is upstream's to make" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant 5.12.0 is unmaintained; upstream's own transitive dependency, and the fix is upstream's to make" },
 ]
 
 [licenses]
