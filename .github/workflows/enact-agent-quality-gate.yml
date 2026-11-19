@@ -1780,7 +1780,7 @@ jobs:
       - name: Validate scoped lru advisory exception
         run: python3 scripts/ci/lru_advisory_scope_test.py
       - name: Check licenses, sources, and advisories
-        run: cargo deny --config overlays/enact/deny.toml check
+        run: cargo deny check --config overlays/enact/deny.toml
       - name: Lockfile integrity
         run: cargo verify-project && cargo fetch --locked
 
@@ -1925,7 +1925,7 @@ jobs:
       - name: Docs link gate (added links)
         env:
           BASE_SHA: ${{ steps.base.outputs.sha }}
-        run: bash scripts/ci/docs_links_gate.sh
+        run: bash scripts/ci/enact/docs_links_gate.sh
       - name: Docs link gate (all internal links)
         run: python3 scripts/ci/check_internal_docs_links.py
       - name: Docs link checker unit tests

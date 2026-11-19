@@ -4936,6 +4936,26 @@ def project_enact_hooks_docs(source):
     )
 
 
+def project_enact_book_summary(source):
+    """List the fork's release runbook in the book's table of contents.
+
+    The runbook is the fork's own page, so the book's index has to name it.
+    The index is upstream's file, so the line is projected here rather than
+    carried in the tracked tree.
+
+    A projection rather than a whole-file overlay on purpose: the index lists
+    every page in the book, and a copy of it in the overlay store would carry
+    two hundred links whose targets live in the tracked tree, which the docs
+    link gate would report as broken.
+    """
+    replace_required(
+        source / "docs/book/src/SUMMARY.md",
+        "  - [Release runbook](./maintainers/release-runbook.md)\n",
+        "  - [Release runbook](./maintainers/release-runbook.md)\n"
+        "  - [Enact Agent release runbook](./maintainers/enact-release-runbook.md)\n",
+    )
+
+
 def project_enact_context_tools(source):
     """Ship the context and code-intelligence tools.
 
@@ -8449,6 +8469,7 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
     project_enact_declarative_hooks(SOURCE)
     project_enact_trust_split(SOURCE)
     project_enact_hooks_docs(SOURCE)
+    project_enact_book_summary(SOURCE)
     project_enact_context_tools(SOURCE)
     project_enact_tool_families(SOURCE)
     project_enact_deferred_builtin_surface(SOURCE)
