@@ -378,8 +378,8 @@ jobs:
         run: cargo doc --no-deps --workspace --exclude zeroclaw-desktop
       - name: Comment hygiene gate (no issue refs / review notes / truncation artifacts)
         run: |
-          bash scripts/ci/comment_hygiene_gate.test.sh
-          bash scripts/ci/comment_hygiene_gate.sh
+          bash scripts/ci/enact/comment_hygiene_gate.test.sh
+          bash scripts/ci/enact/comment_hygiene_gate.sh
       - name: Container build inputs gate (root build.rs reaches every source build)
         run: |
           bash scripts/ci/container_build_inputs_gate.test.sh

@@ -2372,50 +2372,6 @@ def overlay_file_store(source):
         shutil.copy2(entry, target)
 
 
-def project_enact_bedrock_imds_optout(source):
-    """Let an operator keep the Bedrock provider off the metadata service.
-
-    The AWS SDKs honour `AWS_EC2_METADATA_DISABLED`, and the IMDS address is
-    not exclusively AWS's: a GitHub-hosted runner is an Azure VM, and that
-    address answers with something that is not an AWS metadata document. The
-    SDK then hangs on a response it cannot use, and the credential path
-    reports a timeout instead of the missing credential it actually has.
-
-    Skipping the service keeps the failure on the missing credential, which is
-    what the credential path is supposed to report, and it lets the fork's
-    hosted CI exercise the provider's own credential handling.
-
-    The opt-out is read from the environment, so it is off unless an operator
-    or a CI job sets it. The anchor is the function's own signature, which
-    upstream carries exactly once.
-    """
-    bedrock = source / "crates/zeroclaw-providers/src/bedrock.rs"
-    if "AWS_EC2_METADATA_DISABLED" in bedrock.read_text():
-        raise RuntimeError(
-            "Upstream overlay drift: the metadata opt-out is already projected in "
-            f"{bedrock}"
-        )
-    old = "    async fn from_imds() -> anyhow::Result<Self> {\n"
-    new = (
-        "    async fn from_imds() -> anyhow::Result<Self> {\n"
-        "        // The AWS SDKs honour this flag, and the metadata address is not\n"
-        "        // exclusively AWS's: a GitHub-hosted runner is an Azure VM where the\n"
-        "        // address answers with something that is not an AWS metadata\n"
-        "        // document. Skipping the service keeps the failure on the missing\n"
-        "        // credential, which is what the credential path is supposed to\n"
-        "        // report.\n"
-        "        if std::env::var(\"AWS_EC2_METADATA_DISABLED\")\n"
-        "            .map(|value| !matches!(value.trim(), \"\" | \"0\" | \"false\" | \"FALSE\" | \"False\"))\n"
-        "            .unwrap_or(false)\n"
-        "        {\n"
-        "            anyhow::bail!(\n"
-        "                \"EC2 instance metadata access is disabled, so no instance credentials are available\"\n"
-        "            );\n"
-        "        }\n"
-    )
-    replace_required(bedrock, old, new)
-
-
 def manifest():
     brand = json.loads((ROOT / "overlays/enact/brand.json").read_text())
     if not re.fullmatch(r"[a-z][a-z0-9-]*", brand["command"]):
@@ -8480,7 +8436,6 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
     project_enact_coordination(SOURCE)
     project_enact_turn_control(SOURCE)
     project_enact_upstream_clippy_fixes(SOURCE)
-    project_enact_bedrock_imds_optout(SOURCE)
     project_enact_plugin_hooks(SOURCE)
     project_enact_branding_consistency(SOURCE)
     project_enact_builtin_selection_fixture(SOURCE)
