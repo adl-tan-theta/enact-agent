@@ -46,7 +46,7 @@ Edit `overlays/enact/release.json`:
 
 ```json
 {
-  "version": "0.9.0-enact.3",
+  "version": "0.9.0-enact.4",
   "upstreamRepository": "https://github.com/zeroclaw-labs/zeroclaw.git",
   "forkRepository": "https://github.com/adl-tan-theta/enact-agent.git",
   "upstreamCommit": "3a3f2e35865579843e5c37d8eee2e612cd98cd26"
@@ -67,8 +67,8 @@ checks are the same ones every other change has to pass.
 ### Step 2: Tag the commit
 
 ```sh
-git tag enact-agent-v0.9.0-enact.3 <commit>
-git push origin enact-agent-v0.9.0-enact.3
+git tag enact-agent-v0.9.0-enact.4 <commit>
+git push origin enact-agent-v0.9.0-enact.4
 ```
 
 The tag name must match the recorded version exactly. The workflow refuses a
@@ -99,7 +99,7 @@ reaching a user's terminal.
 ### Step 4: Verify the published release
 
 ```sh
-tag=enact-agent-v0.9.0-enact.3
+tag=enact-agent-v0.9.0-enact.4
 base="https://github.com/adl-tan-theta/enact-agent/releases/download/${tag}"
 
 curl -fsSLO "${base}/SHA256SUMS-${tag#enact-agent-v}"
