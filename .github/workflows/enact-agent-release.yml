@@ -111,10 +111,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The distribution ships the three targets `install.sh` can resolve:
-        # Apple Silicon macOS and x86_64 Linux. Each runner builds
-        # for its own host triple, and `build.py` names the archive after the
-        # target it detects.
+        # The distribution ships the two targets `install.sh` can resolve:
+        # Apple Silicon macOS and x86_64 Linux. There is no Intel macOS
+        # archive. Each runner builds for its own host triple, and `build.py`
+        # names the archive after the target it detects.
         os: [ubuntu-22.04, macos-15]
     env:
       SCCACHE_BASEDIRS: ${{ github.workspace }}
@@ -247,10 +247,10 @@ jobs:
           test -f "$output/SHA256SUMS"
 
           # The overlay writes the checksum file as `SHA256SUMS`. Every build
-          # job produces one, and the publish job merges the three artifacts
-          # into a single directory — three files with the same name would
-          # overwrite each other and leave one platform described. Rename it
-          # after this job's target so the merge stays lossless.
+          # job produces one, and the publish job merges the artifacts into a
+          # single directory — files with the same name would overwrite each
+          # other and leave one platform described. Rename it after this
+          # job's target so the merge stays lossless.
           target="${archive_name#"${RELEASE_TAG}-"}"
           target="${target%.tar.gz}"
           mv "$output/SHA256SUMS" "$output/SHA256SUMS-${target}"
@@ -332,12 +332,14 @@ jobs:
             [ "$part" = "$manifest" ] && continue
             parts+=("$part")
           done
-          test "${#parts[@]}" -eq 3
+          # One checksum part per built target: Apple Silicon macOS and
+          # x86_64 Linux. The fork does not publish an Intel macOS archive.
+          test "${#parts[@]}" -eq 2
           cat "${parts[@]}" > "$manifest"
           sort -k2 -o "$manifest" "$manifest"
 
           archives=("$assets"/*.tar.gz)
-          test "${#archives[@]}" -eq 3
+          test "${#archives[@]}" -eq 2
 
           # Every published asset is named after the distribution tag, and the
           # checksum manifest must describe exactly those files.
