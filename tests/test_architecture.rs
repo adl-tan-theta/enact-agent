@@ -27,9 +27,6 @@ mod publish_contract;
 #[path = "architecture/ci_runner_labels.rs"]
 mod ci_runner_labels;
 
-#[path = "architecture/enact_release.rs"]
-mod enact_release;
-
 #[path = "architecture/auth_boundary.rs"]
 mod auth_boundary;
 

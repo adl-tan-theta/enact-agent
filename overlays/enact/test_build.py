@@ -1354,11 +1354,19 @@ class OverlayFileStoreTests(unittest.TestCase):
             tracked = build.ROOT / relative
             with self.subTest(path=relative.as_posix()):
                 if not tracked.is_file():
-                    self.fail(
-                        f"{relative} is in the overlay store but is also tracked; "
-                        "a file the overlay supplies must not be tracked, or "
-                        "the fork's text lives in two places at once"
+                    # A fork-new file is not tracked at all: upstream never
+                    # had it, so there is nothing to keep in step with.
+                    self.assertFalse(
+                        subprocess.run(
+                            ["git", "ls-files", "--error-unmatch", relative.as_posix()],
+                            cwd=build.ROOT, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        ).returncode == 0,
+                        f"{relative} is in the overlay store and is also tracked: "
+                        "a file the overlay supplies must not be tracked, or the "
+                        "fork's text lives in two places at once",
                     )
+                    continue
                 upstream = subprocess.check_output(
                     ["git", "show", f"{base}:{relative.as_posix()}"], cwd=build.ROOT
                 )
@@ -1552,7 +1560,7 @@ class ReleaseTests(unittest.TestCase):
                 shutil.copy2(source / filename, artifact / filename)
             (artifact / "UPSTREAM.txt").write_text("Archive format test attribution fixture\n")
             for filename in (brand["logo"], brand["logoDark"]):
-                shutil.copy2(build.ROOT / "web/public" / filename, source / "web/public" / filename)
+                shutil.copy2(build.brand_asset("web/public", filename), source / "web/public" / filename)
             with patch.object(build, "SOURCE", source):
                 archive = build.package_native_release(brand, artifact, root)
                 with tarfile.open(archive) as stream:
@@ -1588,7 +1596,7 @@ class ReleaseTests(unittest.TestCase):
     def test_canonical_multiline_svg_dimensions_and_tray_indicator(self):
         brand = build.manifest()
         for filename in (brand["logo"], brand["logoDark"]):
-            original = (build.ROOT / "web/public" / filename).read_text()
+            original = build.brand_asset("web/public", filename).read_text()
             parsed = ET.fromstring(original)
             rendered = ET.fromstring(build.desktop_svg(original, "#22c55e"))
             self.assertEqual(rendered.attrib["viewBox"], parsed.attrib["viewBox"])

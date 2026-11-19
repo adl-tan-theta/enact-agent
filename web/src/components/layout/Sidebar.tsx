@@ -1,5 +1,3 @@
-import { brandLogo } from '@/lib/branding';
-import { useTheme } from '@/hooks/useTheme';
 import { useLocation } from 'react-router-dom';
 import { basePath } from '../../lib/basePath';
 import { navAccessFor, pathAccess } from '../../lib/navAccess';
@@ -448,7 +446,6 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
 
 // Compact mark for the slim rail — the logo image only, centered, no wordmark.
 function RailLogo() {
-  const { resolvedTheme } = useTheme();
   return (
     <div
       className="flex items-center justify-center border-b shrink-0"
@@ -460,9 +457,9 @@ function RailLogo() {
           style={{ background: 'linear-gradient(135deg, rgba(var(--pc-accent-rgb), 0.15), rgba(var(--pc-accent-rgb), 0.05))' }}
         />
         <img
-          src={`${basePath}/_app/${brandLogo(resolvedTheme)}`}
+          src={`${basePath}/_app/logo.png`}
           alt={t('sidebar.logo_alt')}
-          className="relative h-8 w-8 object-contain"
+          className="relative h-8 w-8 rounded-xl object-cover"
           onError={(e) => {
             e.currentTarget.style.display = 'none';
           }}
@@ -474,7 +471,6 @@ function RailLogo() {
 
 // Full mark + wordmark for the mobile drawer.
 function DrawerLogo() {
-  const { resolvedTheme } = useTheme();
   return (
     <div
       className="flex items-center border-b shrink-0 overflow-hidden"
@@ -486,9 +482,9 @@ function DrawerLogo() {
           style={{ background: 'linear-gradient(135deg, rgba(var(--pc-accent-rgb), 0.15), rgba(var(--pc-accent-rgb), 0.05))' }}
         />
         <img
-          src={`${basePath}/_app/${brandLogo(resolvedTheme)}`}
+          src={`${basePath}/_app/logo.png`}
           alt={t('sidebar.logo_alt')}
-          className="relative h-9 w-9 object-contain"
+          className="relative h-9 w-9 rounded-xl object-cover"
           onError={(e) => {
             e.currentTarget.style.display = 'none';
           }}

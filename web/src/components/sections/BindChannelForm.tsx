@@ -1,4 +1,3 @@
-import { brand } from '@/lib/branding';
 // Operator-bind form: authorize a user on a pairing channel (Telegram /
 // WeChat / LINE) by adding their native id to the channel's allowlist — the
 // GUI equivalent of `zeroclaw channel bind-<type> <id> --alias <alias>`. The
@@ -84,7 +83,7 @@ export default function BindChannelForm({
   // there; for WeChat/LINE the button is the bind surface.
   const cliCommand =
     channelType === "telegram" && identity.trim()
-      ? `${brand.command} channel bind-telegram ${identity.trim()}${
+      ? `zeroclaw channel bind-telegram ${identity.trim()}${
           alias === "default" ? "" : ` --alias ${alias}`
         }`
       : "";

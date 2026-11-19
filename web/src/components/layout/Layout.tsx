@@ -8,7 +8,6 @@ import { MainColumn } from '@/components/layout/MainColumn';
 import CommandPalette, { useCommandPalette } from '@/components/CommandPalette';
 import { NotAvailable } from '@/components/auth/NotAvailable';
 import { ErrorBoundary } from '@/App';
-import { brand } from '@/lib/branding';
 import { useAuth } from '@/hooks/useAuth';
 import { t } from '@/lib/i18n';
 import { homePathFor, navAccessFor, pathAccess } from '@/lib/navAccess';
@@ -62,7 +61,7 @@ export default function Layout() {
       const key = TITLE_KEYS[first];
       name = key ? t(key) : null;
     }
-    document.title = name ? `${name} — ${brand.name}` : brand.name;
+    document.title = name ? `${name} — ZeroClaw` : 'ZeroClaw';
   }, [pathname]);
 
   return (

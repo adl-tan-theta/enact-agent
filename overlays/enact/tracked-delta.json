@@ -2,21 +2,12 @@
   "comment": [
     "Upstream-owned files whose fork text stays in the tracked tree on purpose.",
     "",
-    "The overlay file store (overlays/enact/files/) is the mechanism for a",
-    "whole upstream-owned file whose only consumer is the prepared tree. It",
-    "cannot reach the tracked tree, so a file that the tracked tree's own",
-    "tooling reads -- GitHub Actions, the scripts/ci suite, the web build,",
-    "install.sh, the docs gate, cargo-deny -- has to keep its fork text in",
-    "the tracked tree.",
+    "This list is a temporary record of the last upstream-owned deltas. The",
+    "fork's goal is zero touching of stock files: every path here is meant to",
+    "leave the list as the fork's own workflow and script copies take over.",
     "",
-    "This list is that record. Every path below is an upstream-owned file",
-    "that carries fork text in the tracked tree, with the reason it cannot",
-    "be overlaid. The release gate compares the tracked tree against the",
-    "pinned upstream base and refuses to release when a path drifts that is",
-    "not on this list. A new upstream-owned delta therefore fails the gate",
-    "until someone adds it here, with its reason.",
-    "",
-    "A path leaves this list when its consumer moves to the prepared tree."
+    "The release gate compares the tracked tree against the pinned upstream",
+    "base and refuses to release when a path drifts that is not on this list."
   ],
   "paths": [
     {
@@ -56,30 +47,6 @@
       "reason": "GitHub Actions reads the workflow from the tracked tree. The overlay cannot supply it."
     },
     {
-      "path": "AGENTS.md",
-      "reason": "The fork's pointer to the overlay contract is read from the tracked tree by every agent that opens the repository."
-    },
-    {
-      "path": "deny.toml",
-      "reason": "cargo-deny and tests/component/dockerignore_test.rs read this from the tracked tree. The fork's advisory waivers live here."
-    },
-    {
-      "path": "docs/book/src/SUMMARY.md",
-      "reason": "The docs gate builds the book from the tracked tree. The fork's runbook is listed here."
-    },
-    {
-      "path": "docs/book/src/maintainers/ci-and-actions.md",
-      "reason": "The docs gate builds the book from the tracked tree. The overlay cannot supply it."
-    },
-    {
-      "path": "install.sh",
-      "reason": "tests/architecture/enact_release.rs reads the installer from the tracked tree and asserts the fork's release contract; upstream's installer fails those assertions. cargo generate installers --check validates the same file."
-    },
-    {
-      "path": "nix/web.nix",
-      "reason": "The Nix web build reads overlays/enact/brand.json through this file, and it builds from the tracked tree."
-    },
-    {
       "path": "scripts/ci/apt_install.sh",
       "reason": "The CI jobs run this script from the tracked tree. The overlay cannot supply it."
     },
@@ -98,78 +65,6 @@
     {
       "path": "scripts/ci/parallel_runtime_test_gate.sh",
       "reason": "The CI jobs run this script from the tracked tree, and scripts/ci/parallel_runtime_test_scope.test.sh asserts against it."
-    },
-    {
-      "path": "tests/architecture/ci_runner_labels.rs",
-      "reason": "The gate runs from the tracked tree and reads the fork's own workflow files. It is the fork's gate over the fork's CI."
-    },
-    {
-      "path": "tests/test_architecture.rs",
-      "reason": "The gate runs from the tracked tree and registers the fork's own architecture detectors."
-    },
-    {
-      "path": "web/index.html",
-      "reason": "The web build runs from the tracked tree. The fork's title and its brand placeholders live here."
-    },
-    {
-      "path": "web/package.json",
-      "reason": "The web build and the web tests run from the tracked tree. The fork's branding test is wired into pretest here."
-    },
-    {
-      "path": "web/src/components/SettingsModal.tsx",
-      "reason": "The web build runs from the tracked tree. The overlay cannot supply it."
-    },
-    {
-      "path": "web/src/components/auth/SignInScreen.test.ts",
-      "reason": "The web tests run from the tracked tree. The overlay cannot supply it."
-    },
-    {
-      "path": "web/src/components/auth/SignInScreen.tsx",
-      "reason": "The web build runs from the tracked tree. The fork's sign-in surface lives here."
-    },
-    {
-      "path": "web/src/components/layout/Layout.tsx",
-      "reason": "The web build runs from the tracked tree. The overlay cannot supply it."
-    },
-    {
-      "path": "web/src/components/layout/ReloadBanner.tsx",
-      "reason": "The web build runs from the tracked tree. The overlay cannot supply it."
-    },
-    {
-      "path": "web/src/components/layout/Sidebar.tsx",
-      "reason": "The web build runs from the tracked tree. The fork's navigation lives here."
-    },
-    {
-      "path": "web/src/components/sections/BindChannelForm.tsx",
-      "reason": "The web build runs from the tracked tree. The overlay cannot supply it."
-    },
-    {
-      "path": "web/src/contexts/ThemeContext.tsx",
-      "reason": "The web build runs from the tracked tree. The overlay cannot supply it."
-    },
-    {
-      "path": "web/src/contexts/turnStream.logic.test.ts",
-      "reason": "The web tests run from the tracked tree. The overlay cannot supply it."
-    },
-    {
-      "path": "web/src/lib/i18n.ts",
-      "reason": "The web build runs from the tracked tree. The overlay cannot supply it."
-    },
-    {
-      "path": "web/src/main.tsx",
-      "reason": "The web build runs from the tracked tree. The fork's application root lives here."
-    },
-    {
-      "path": "web/src/pages/AcpConsole.tsx",
-      "reason": "The web build runs from the tracked tree. The overlay cannot supply it."
-    },
-    {
-      "path": "web/tsconfig.app.json",
-      "reason": "The web build runs from the tracked tree. The fork's branding module imports overlays/enact/brand.json, which needs resolveJsonModule here."
-    },
-    {
-      "path": "web/vite.config.ts",
-      "reason": "The web build runs from the tracked tree. The fork's brand plugin reads overlays/enact/brand.json at build time."
     }
   ]
 }

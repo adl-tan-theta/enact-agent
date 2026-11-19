@@ -2339,6 +2339,24 @@ def project_enact_hook_wit_input_inventory(source):
     replace_required(tests, old, new)
 
 
+def brand_asset(*parts):
+    """Resolve a brand asset the fork owns, wherever it lives.
+
+    A brand asset is either a tracked file -- one upstream never had -- or an
+    entry in the overlay file store. The store holds the fork's whole-file
+    versions of upstream-owned paths, and a fork-new asset is tracked. This
+    resolver finds either, so a caller that needs the canonical bytes does
+    not have to know which of the two it is looking at.
+    """
+    tracked = ROOT.joinpath(*parts)
+    if tracked.is_file():
+        return tracked
+    stored = FILE_STORE.joinpath(*parts)
+    if stored.is_file():
+        return stored
+    raise RuntimeError(f"Missing canonical asset: {'/'.join(parts)}")
+
+
 def overlay_file_store(source):
     """Install the fork's whole-file versions over the prepared tree.
 
@@ -2745,6 +2763,20 @@ def project_enact_upstream_clippy_fixes(source):
         ".is_some_and(&is_word_char);",
         ".is_some_and(is_word_char);",
         2,
+    )
+
+    # The gateway's websocket upgrade and its turn stream both move a
+    # hyper error type into a spawned task. Evaluating that type's `Send`
+    # bound needs more recursion than the default limit allows once the
+    # fork's tool surface is in the graph, and the compiler reports the
+    # overflow as an unsatisfied bound rather than as a limit. The limit is
+    # the fix, and it belongs in the prepared tree: the tracked tree keeps
+    # upstream's bytes.
+    gateway = source / "crates/zeroclaw-gateway/src/lib.rs"
+    replace_required(
+        gateway,
+        "#![allow(\n",
+        "#![recursion_limit = \"512\"]\n#![allow(\n",
     )
 
     config_manager = source / "apps/zerocode/src/config_manager.rs"
@@ -3401,6 +3433,29 @@ def project_enact_installer_environment(source):
     )
 
 
+def project_enact_nix_web_brand(source):
+    """Give the Nix web build the brand manifest the web tree imports.
+
+    `web/src/lib/branding.ts` imports `overlays/enact/brand.json`, and
+    `web/vite.config.ts` reads the same file at build time. The Nix web
+    build compiles `web/` on its own, outside the repository, so the relative
+    path the import names does not exist there.
+
+    The copy restores it. It is a build input, not a product file, so it
+    belongs to the prepared tree and not to the tracked one.
+    """
+    web_nix = source / "nix/web.nix"
+    replace_required(
+        web_nix,
+        "    preBuild = ''\n",
+        "    preBuild = ''\n"
+        "      # The Enact overlay is shared with CLI/desktop packaging and lives\n"
+        "      # outside web/. Restore its relative location in this web-only source.\n"
+        "      mkdir -p ../overlays/enact\n"
+        "      cp ${../overlays/enact/brand.json} ../overlays/enact/brand.json\n",
+    )
+
+
 def project_enact_container_environment(source):
     """Keep the Compose runtime overrides aligned with Enact's env prefix."""
     compose = source / "docker-compose.yml"
@@ -3663,6 +3718,287 @@ def project_enact_component_fixtures(source, brand):
         "zeroclaw cron",
         f"{command} cron",
         12,
+    )
+
+
+def project_enact_web_branding(source):
+    """Give the dashboard the fork's name, command and logos.
+
+    The dashboard reads the brand from `web/src/lib/branding.ts`, which
+    imports `overlays/enact/brand.json`. Every surface that shows the
+    product's name, prints its command or draws its logo has to go through
+    that module, or the dashboard ships upstream's identity inside the
+    fork's shell.
+
+    This belongs in the overlay and not in the tracked tree. The tracked
+    web tree is upstream's, and the fork's web build runs against the
+    prepared tree, so the fork's branding reaches the shipped dashboard
+    without the tracked tree carrying fork text in a file upstream owns.
+
+    Each edit is anchored on upstream's own text and counts its matches,
+    so upstream drift is a loud error rather than a silent mismatch.
+    """
+    # ── the application root ──────────────────────────────────────────
+    replace_required(
+        source / "web/src/main.tsx",
+        "import App from './App';",
+        "import App from './EnactApp';",
+    )
+
+    # ── the document title ────────────────────────────────────────────
+    layout = source / "web/src/components/layout/Layout.tsx"
+    replace_required(
+        layout,
+        "import { Navigate, Outlet, useLocation } from 'react-router-dom';\n",
+        "import { Navigate, Outlet, useLocation } from 'react-router-dom';\n"
+        "import { brand } from '@/lib/branding';\n",
+    )
+    replace_required(
+        layout,
+        "    document.title = name ? `${name} — ZeroClaw` : 'ZeroClaw';",
+        "    document.title = name ? `${name} — ${brand.name}` : brand.name;",
+    )
+
+    # ── the reload hint ───────────────────────────────────────────────
+    banner = source / "web/src/components/layout/ReloadBanner.tsx"
+    replace_required(
+        banner,
+        "import { useState } from 'react';\n",
+        "import { brand } from '@/lib/branding';\nimport { useState } from 'react';\n",
+    )
+    replace_required(
+        banner,
+        '<code className="font-mono">zeroclaw reload</code>',
+        '<code className="font-mono">{brand.command} reload</code>',
+    )
+
+    # ── the typography preview ────────────────────────────────────────
+    replace_required(
+        source / "web/src/components/SettingsModal.tsx",
+        "const hello = 'ZeroClaw'; // typography preview",
+        "const hello = t('sidebar.brand'); // typography preview",
+    )
+
+    # ── the ACP console fallback ──────────────────────────────────────
+    replace_required(
+        source / "web/src/pages/AcpConsole.tsx",
+        "return info?.title ?? info?.name ?? 'ZeroClaw ACP';",
+        "return info?.title ?? info?.name ?? `${t('sidebar.brand')} ACP`;",
+    )
+
+    # ── the channel binding hint ──────────────────────────────────────
+    bind = source / "web/src/components/sections/BindChannelForm.tsx"
+    replace_required(
+        bind,
+        'import { useEffect, useMemo, useState } from "react";\n',
+        'import { brand } from "@/lib/branding";\nimport { useEffect, useMemo, useState } from "react";\n',
+    )
+    replace_required(
+        bind,
+        "? `zeroclaw channel bind-telegram ${identity.trim()}${",
+        "? `${brand.command} channel bind-telegram ${identity.trim()}${",
+    )
+
+    # ── the sidebar logos ─────────────────────────────────────────────
+    sidebar = source / "web/src/components/layout/Sidebar.tsx"
+    replace_required(
+        sidebar,
+        "import { useLocation } from 'react-router-dom';\n",
+        "import { useLocation } from 'react-router-dom';\n"
+        "import { brandLogo } from '@/lib/branding';\n"
+        "import { useTheme } from '@/hooks/useTheme';\n",
+    )
+    replace_count_required(
+        sidebar,
+        "src={`${basePath}/_app/logo.png`}",
+        "src={`${basePath}/_app/${brandLogo(resolvedTheme)}`}",
+        2,
+    )
+    replace_count_required(
+        sidebar,
+        "className=\"relative h-8 w-8 rounded-xl object-cover\"",
+        "className=\"relative h-8 w-8 object-contain\"",
+        1,
+    )
+    replace_count_required(
+        sidebar,
+        "className=\"relative h-9 w-9 rounded-xl object-cover\"",
+        "className=\"relative h-9 w-9 object-contain\"",
+        1,
+    )
+    # The two logo components each need the resolved theme to pick the
+    # light or dark mark. Upstream's components do not read the theme.
+    replace_required(
+        sidebar,
+        "function RailLogo() {\n  return (\n",
+        "function RailLogo() {\n  const { resolvedTheme } = useTheme();\n  return (\n",
+    )
+    replace_required(
+        sidebar,
+        "function DrawerLogo() {\n  return (\n",
+        "function DrawerLogo() {\n  const { resolvedTheme } = useTheme();\n  return (\n",
+    )
+
+    # ── the sign-in screen ────────────────────────────────────────────
+    sign_in = source / "web/src/components/auth/SignInScreen.tsx"
+    replace_required(
+        sign_in,
+        'import { basePath } from "../../lib/basePath";\n',
+        'import { basePath } from "../../lib/basePath";\n'
+        'import { brand, brandLogo } from "../../lib/branding";\n'
+        'import { useTheme } from "../../hooks/useTheme";\n',
+    )
+    replace_required(
+        sign_in,
+        'const cliRecoveryCommand = `zeroclaw gateway get-paircode --new${gatewayPort ? ` --port ${gatewayPort}` : ""}`;',
+        'const cliRecoveryCommand = `${brand.command} gateway get-paircode --new${gatewayPort ? ` --port ${gatewayPort}` : ""}`;',
+    )
+    replace_required(
+        sign_in,
+        'src={`${basePath}/_app/logo.png`}',
+        'src={`${basePath}/_app/${brandLogo(resolvedTheme)}`}',
+    )
+    replace_required(
+        sign_in,
+        'alt="ZeroClaw"',
+        'alt={t("sidebar.logo_alt")}',
+    )
+    replace_required(
+        sign_in,
+        'className="h-20 w-20 rounded-2xl object-cover mx-auto mb-4 animate-float"',
+        'className="h-20 w-20 object-contain mx-auto mb-4 animate-float"',
+    )
+    replace_required(
+        sign_in,
+        '          <h1 className="text-2xl font-bold mb-2 text-gradient-blue">\n'
+        "            ZeroClaw\n"
+        "          </h1>\n",
+        '          <h1 className="text-2xl font-bold mb-2 text-gradient-blue">\n'
+        '            {t("sidebar.brand")}\n'
+        "          </h1>\n",
+    )
+    # The sign-in frame draws the product's mark, so it needs the resolved
+    # theme to pick the light or dark asset.
+    replace_required(
+        sign_in,
+        "function SignInFrame({ status, children }: { status: ReactNode; children: ReactNode }) {\n"
+        "  return (\n",
+        "function SignInFrame({ status, children }: { status: ReactNode; children: ReactNode }) {\n"
+        "  const { resolvedTheme } = useTheme();\n"
+        "  return (\n",
+    )
+
+    # ── the theme accent ──────────────────────────────────────────────
+    theme = source / "web/src/contexts/ThemeContext.tsx"
+    replace_required(
+        theme,
+        "import { createContext, useState, useEffect, useCallback, type ReactNode } from 'react';\n",
+        "import { brand } from '../lib/branding';\n"
+        "import { createContext, useState, useEffect, useCallback, type ReactNode } from 'react';\n",
+    )
+    replace_count_required(
+        theme,
+        "accent: 'cyan',",
+        "accent: brand.accent as AccentColor,",
+        2,
+    )
+
+    # ── the translated strings ────────────────────────────────────────
+    i18n = source / "web/src/lib/i18n.ts"
+    replace_required(
+        i18n,
+        "import { getStatus } from './api';\n",
+        "import { getStatus } from './api';\nimport { brandDisplayText } from './branding';\n",
+    )
+    replace_required(
+        i18n,
+        "  return translations[currentLocale]?.[key] ?? translations.en[key] ?? key;",
+        "  return tLocale(key, currentLocale);",
+    )
+    replace_required(
+        i18n,
+        "  return translations[locale]?.[key] ?? translations.en[key] ?? key;",
+        "  return brandDisplayText(translations[locale]?.[key] ?? translations.en[key] ?? key);",
+    )
+
+    # ── the sign-in regression ─────────────────────────────────────────
+    sign_in_test = source / "web/src/components/auth/SignInScreen.test.ts"
+    replace_required(
+        sign_in_test,
+        'import { act, create, type ReactTestRenderer } from "react-test-renderer";\n',
+        'import { act, create, type ReactTestRenderer } from "react-test-renderer";\n'
+        'import { brandDisplayText } from "../../lib/branding.ts";\n',
+    )
+    replace_required(
+        sign_in_test,
+        'assert.ok(html.includes("signed out of ZeroClaw. You may still be signed in at corp."));',
+        'assert.ok(html.includes(brandDisplayText("signed out of ZeroClaw. You may still be signed in at corp.")));',
+    )
+
+    # ── the branding regression runs before the others ─────────────────
+    package = source / "web/package.json"
+    replace_required(
+        package,
+        '    "pretest": "npm run pretest:contexts && node --experimental-strip-types --test src/contexts/turnStream.logic.test.ts",\n',
+        '    "pretest": "npm run test:branding && npm run pretest:contexts && node --experimental-strip-types --test src/contexts/turnStream.logic.test.ts",\n',
+    )
+    replace_required(
+        package,
+        '    "test:contexts": "node --experimental-strip-types --test',
+        '    "test:branding": "jiti src/lib/branding.test.ts",\n'
+        '    "test:contexts": "node --experimental-strip-types --test',
+    )
+
+    # ── the JSON import needs the bundler resolution mode ──────────────
+    replace_required(
+        source / "web/tsconfig.app.json",
+        '    "moduleResolution": "bundler",\n',
+        '    "moduleResolution": "bundler",\n    "resolveJsonModule": true,\n',
+    )
+
+    # ── the page shell carries the brand placeholders ──────────────────
+    index = source / "web/index.html"
+    replace_required(
+        index,
+        '    <link rel="icon" type="image/png" href="/_app/logo.png" />\n',
+        '    <link rel="stylesheet" href="/enact-pairing.css" />\n'
+        '    <link rel="icon" type="image/svg+xml" href="/_app/%ENACT_LOGO%" media="(prefers-color-scheme: light)" />\n'
+        '    <link rel="icon" type="image/svg+xml" href="/_app/%ENACT_LOGO_DARK%" media="(prefers-color-scheme: dark)" />\n',
+    )
+    replace_required(
+        index,
+        "    <title>ZeroClaw</title>\n",
+        "    <title>%ENACT_NAME%</title>\n",
+    )
+    replace_required(
+        index,
+        "      Your browser is not supported for the ZeroClaw web dashboard. Please use\n",
+        "      Your browser is not supported for the %ENACT_NAME% web dashboard. Please use\n",
+    )
+
+    # ── the build replaces the placeholders with the brand ─────────────
+    vite = source / "web/vite.config.ts"
+    replace_required(
+        vite,
+        "import path from \"path\";\n",
+        "import path from \"path\";\n"
+        "import { readFileSync } from \"node:fs\";\n"
+        "\n"
+        "const brand = JSON.parse(readFileSync(new URL(\"../overlays/enact/brand.json\", import.meta.url), \"utf8\"));\n",
+    )
+    replace_required(
+        vite,
+        "  plugins: [\n",
+        "  plugins: [\n"
+        "    {\n"
+        "      name: \"enact-brand-html\",\n"
+        "      transformIndexHtml: {\n"
+        "        order: \"pre\",\n"
+        "        handler(html) {\n"
+        "          return html.replaceAll(\"%ENACT_NAME%\", brand.name).replaceAll(\"%ENACT_LOGO%\", brand.logo).replaceAll(\"%ENACT_LOGO_DARK%\", brand.logoDark);\n"
+        "        },\n"
+        "      },\n"
+        "    },\n",
     )
 
 
@@ -8158,6 +8494,7 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
     project_enact_config_dir_branding(SOURCE)
     project_enact_installer_environment(SOURCE)
     project_enact_container_environment(SOURCE)
+    project_enact_nix_web_brand(SOURCE)
 
     # Retain Fluent keys, placeholders, URLs, config paths and crate identities.
     # Only the existing product literal and bare command examples are projected.
@@ -8287,6 +8624,7 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
     project_environment(SOURCE)
     project_workspace_owned_agent_paths(SOURCE)
     project_enact_cli_command_strings(SOURCE, brand)
+    project_enact_web_branding(SOURCE)
     project_enact_component_fixtures(SOURCE, brand)
     project_session_tools(SOURCE)
     project_tool_result_status(SOURCE)

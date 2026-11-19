@@ -218,3 +218,4 @@ test('only CAPABILITY_MISSING and INVALID_JSON leave the running turn going', ()
     assert.equal(errorEndsTurn(code), true, String(code));
   }
 });
+

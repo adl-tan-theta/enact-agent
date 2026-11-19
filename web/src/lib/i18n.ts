@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
 import { getStatus } from './api';
-import { brandDisplayText } from './branding';
 
 // ---------------------------------------------------------------------------
 // Translation dictionaries
@@ -15154,7 +15153,7 @@ export function setLocale(locale: Locale): void {
  * translation is found.
  */
 export function t(key: string): string {
-  return tLocale(key, currentLocale);
+  return translations[currentLocale]?.[key] ?? translations.en[key] ?? key;
 }
 
 /**
@@ -15162,7 +15161,7 @@ export function t(key: string): string {
  * raw key.
  */
 export function tLocale(key: string, locale: Locale): string {
-  return brandDisplayText(translations[locale]?.[key] ?? translations.en[key] ?? key);
+  return translations[locale]?.[key] ?? translations.en[key] ?? key;
 }
 
 // ---------------------------------------------------------------------------

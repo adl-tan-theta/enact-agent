@@ -203,6 +203,5 @@
   - [Labels](./maintainers/labels.md)
   - [Superseding PRs](./maintainers/superseding.md)
   - [Release runbook](./maintainers/release-runbook.md)
-  - [Enact Agent release runbook](./maintainers/enact-release-runbook.md)
   - [Release artifact verification](./maintainers/release-verification.md)
   - [Plugin release acceptance](./maintainers/plugin-release-acceptance.md)
