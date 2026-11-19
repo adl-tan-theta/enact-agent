@@ -4,7 +4,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-INSTALL_SH="$ROOT/install.sh"
+# The tracked installer is upstream's, so the release resolution the fork
+# ships lives in the overlay file store. The test exercises the fork's
+# installer, not the tracked one.
+INSTALL_SH="$ROOT/overlays/enact/files/install.sh"
 
 if [[ ! -f "$INSTALL_SH" ]]; then
   echo "FAIL: install.sh not found at $INSTALL_SH"

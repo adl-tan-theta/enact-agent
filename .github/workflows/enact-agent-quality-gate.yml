@@ -1653,7 +1653,7 @@ jobs:
       - name: Test parallel runtime scope classifier
         run: bash scripts/ci/parallel_runtime_test_scope.test.sh
       - name: Test parallel runtime gate flake absorption
-        run: bash scripts/ci/parallel_runtime_test_gate_flake.test.sh
+        run: bash scripts/ci/enact/parallel_runtime_test_gate_flake.test.sh
       - name: Detect parallel runtime test changes
         id: changed
         shell: bash
