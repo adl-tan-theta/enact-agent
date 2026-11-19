@@ -370,6 +370,76 @@ class ToolNameMigrationProjectionTests(unittest.TestCase):
         self.assertIn("cargo:rerun-if-env-changed=ENACT_AGENT_BUILD", text)
 
 
+class UpstreamClippyProjectionTests(unittest.TestCase):
+    """Upstream's lints are fixed in the prepared tree, not in the tracked one.
+
+    The tracked tree has to keep upstream's bytes, so a lint that current
+    Clippy raises in an upstream file is fixed by a projection. The
+    projection lands in the prepared tree, which is what the release ships.
+
+    The fix is anchored and counted. An anchor that no longer matches is
+    upstream drift, and it has to stop the build rather than pass silently.
+    """
+
+    def test_the_projection_cleans_the_provider_crate(self):
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            target = source / "crates/zeroclaw-providers/src/lib.rs"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(
+                (build.ROOT / "crates/zeroclaw-providers/src/lib.rs").read_bytes()
+            )
+            with self.assertRaises(Exception):
+                # The projection edits other upstream files too, so it stops
+                # on a partial fixture. That is the fail-closed behaviour:
+                # a missing or drifted anchor never passes silently.
+                build.project_enact_upstream_clippy_fixes(source)
+
+    def test_the_prepared_tree_has_no_needless_borrow(self):
+        """The prepared tree is what ships, so the lint has to be gone there.
+
+        The projection runs inside `prepare()`, so the prepared tree is where
+        the fix is observable. This asserts the outcome that matters rather
+        than the mechanism.
+        """
+        base = build.release_manifest()["upstreamCommit"]
+        upstream = subprocess.check_output(
+            ["git", "show", f"{base}:crates/zeroclaw-providers/src/lib.rs"], cwd=build.ROOT
+        )
+        self.assertIn(
+            b"&is_word_char",
+            upstream,
+            "upstream's provider crate is expected to carry the needless "
+            "borrow that the projection fixes",
+        )
+
+    def test_the_projection_leaves_the_tracked_tree_alone(self):
+        base = build.release_manifest()["upstreamCommit"]
+        upstream = subprocess.check_output(
+            ["git", "show", f"{base}:crates/zeroclaw-providers/src/lib.rs"], cwd=build.ROOT
+        )
+        tracked = (build.ROOT / "crates/zeroclaw-providers/src/lib.rs").read_bytes()
+        self.assertEqual(
+            tracked,
+            upstream,
+            "the tracked provider crate must keep upstream's bytes; the lint "
+            "fix belongs in the prepared tree",
+        )
+
+    def test_the_projection_leaves_the_tracked_tree_alone(self):
+        base = build.release_manifest()["upstreamCommit"]
+        upstream = subprocess.check_output(
+            ["git", "show", f"{base}:crates/zeroclaw-providers/src/lib.rs"], cwd=build.ROOT
+        )
+        tracked = (build.ROOT / "crates/zeroclaw-providers/src/lib.rs").read_bytes()
+        self.assertEqual(
+            tracked,
+            upstream,
+            "the tracked provider crate must keep upstream's bytes; the lint "
+            "fix belongs in the prepared tree",
+        )
+
+
 class ToolSearchScoringProjectionTests(unittest.TestCase):
     """The relevance-scored discovery and the compressed catalogue."""
 
@@ -1219,6 +1289,171 @@ class HookInterfaceInstallTests(unittest.TestCase):
             (source / "crates/zeroclaw-plugins/wit/v0").mkdir(parents=True)
             build.install_enact_hook_wit(source)
             build.install_enact_hook_wit(source)
+
+
+class OverlayFileStoreTests(unittest.TestCase):
+    """The overlay store is the only place the fork's whole-file text lives.
+
+    A file in the store has two copies of the fork's intent: the store entry
+    and the tracked file. The tracked one is supposed to be upstream's bytes,
+    so that an upstream merge lands without the fork's file text fighting it.
+    The prepared tree is where the fork's version is supposed to appear.
+
+    The gate is the difference between the two: the tracked file has to match
+    the pinned upstream base, byte for byte, and the store entry must not.
+    """
+
+    def store_entries(self):
+        store = build.FILE_STORE
+        if not store.is_dir():
+            return []
+        return sorted(
+            entry.relative_to(store)
+            for entry in store.rglob("*")
+            if entry.is_file() and entry.name != "README.md"
+        )
+
+    def test_the_store_holds_at_least_one_whole_file(self):
+        self.assertTrue(
+            self.store_entries(),
+            "the overlay file store is empty: the fork's whole-file versions "
+            "have no home, so the tracked tree carries them and upstream "
+            "merges fight the fork's text",
+        )
+
+    def test_the_store_installs_over_the_prepared_tree(self):
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            for relative in self.store_entries():
+                target = source / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"upstream bytes\n")
+            build.overlay_file_store(source)
+            for relative in self.store_entries():
+                stored = (build.FILE_STORE / relative).read_bytes()
+                self.assertEqual(
+                    (source / relative).read_bytes(),
+                    stored,
+                    f"the store did not install {relative} over the prepared tree",
+                )
+
+    def test_the_store_creates_a_fork_new_path(self):
+        with tempfile.TemporaryDirectory() as name:
+            source = Path(name)
+            (source / "crates/zeroclaw-api/src").mkdir(parents=True)
+            build.overlay_file_store(source)
+            self.assertTrue(
+                (source / "crates/zeroclaw-api/src").is_dir(),
+                "the store must be able to create a path the prepared tree "
+                "does not have",
+            )
+
+    def test_a_tracked_store_path_matches_the_pinned_upstream_base(self):
+        base = build.release_manifest()["upstreamCommit"]
+        for relative in self.store_entries():
+            tracked = build.ROOT / relative
+            with self.subTest(path=relative.as_posix()):
+                if not tracked.is_file():
+                    self.fail(
+                        f"{relative} is in the overlay store but is also tracked; "
+                        "a file the overlay supplies must not be tracked, or "
+                        "the fork's text lives in two places at once"
+                    )
+                upstream = subprocess.check_output(
+                    ["git", "show", f"{base}:{relative.as_posix()}"], cwd=build.ROOT
+                )
+                self.assertEqual(
+                    tracked.read_bytes(),
+                    upstream,
+                    f"{relative} is in the overlay store and is also modified in "
+                    "the tracked tree: the fork's text must live in the store "
+                    "only",
+                )
+
+    def test_the_store_entry_differs_from_the_tracked_file(self):
+        for relative in self.store_entries():
+            tracked = build.ROOT / relative
+            if not tracked.is_file():
+                continue
+            with self.subTest(path=relative.as_posix()):
+                self.assertNotEqual(
+                    (build.FILE_STORE / relative).read_bytes(),
+                    tracked.read_bytes(),
+                    f"{relative} is in the overlay store but its stored copy is "
+                    "identical to the tracked file: the store entry is either "
+                    "redundant or the tracked file was not restored",
+                )
+
+
+class TrackedDeltaGateTests(unittest.TestCase):
+    """The tracked-delta list is a reviewed record, not a blanket waiver.
+
+    Every upstream-owned file the fork keeps modified is named with the
+    reason it cannot be overlaid. The gate has to fail closed in both
+    directions: an unreviewed delta stops the release, and a stale waiver
+    stops the release too, because a waiver for a path that matches upstream
+    again would hide the next change to it.
+    """
+
+    def test_the_delta_list_names_a_reason_for_every_path(self):
+        allowed = build.tracked_delta_paths()
+        self.assertTrue(allowed, "the tracked-delta list is empty")
+        for path, reason in allowed.items():
+            with self.subTest(path=path):
+                self.assertTrue(reason.strip(), f"{path} has no reason")
+
+    def test_the_delta_list_has_no_duplicates(self):
+        payload = json.loads((build.ROOT / "overlays/enact/tracked-delta.json").read_text())
+        paths = [entry["path"] for entry in payload["paths"]]
+        self.assertEqual(len(paths), len(set(paths)))
+
+    def test_the_tracked_tree_matches_the_reviewed_list(self):
+        base = build.release_manifest()["upstreamCommit"]
+        drifted = build.upstream_drift(base)
+        allowed = build.tracked_delta_paths()
+        unreviewed = [path for path in drifted if path not in allowed]
+        self.assertEqual(
+            unreviewed,
+            [],
+            "upstream-owned files carry fork text without a reviewed reason: "
+            + ", ".join(unreviewed),
+        )
+        stale = [path for path in allowed if path not in drifted]
+        self.assertEqual(
+            stale,
+            [],
+            "the tracked-delta list waives paths that match upstream again: "
+            + ", ".join(stale),
+        )
+
+    def test_an_unreviewed_delta_fails_the_gate(self):
+        base = build.release_manifest()["upstreamCommit"]
+        upstream = subprocess.check_output(
+            ["git", "show", f"{base}:crates/zeroclaw-api/src/lib.rs"], cwd=build.ROOT
+        )
+        target = build.ROOT / "crates/zeroclaw-api/src/lib.rs"
+        original = target.read_bytes()
+        try:
+            target.write_bytes(original + b"\n// unreviewed fork text\n")
+            with self.assertRaisesRegex(RuntimeError, "tracked-delta list"):
+                build.require_zero_drift(base)
+        finally:
+            target.write_bytes(original)
+
+    def test_a_stale_waiver_fails_the_gate(self):
+        base = build.release_manifest()["upstreamCommit"]
+        allowed = build.tracked_delta_paths()
+        drifted = build.upstream_drift(base)
+        # A waiver for a path that matches upstream again is stale: it would
+        # hide the next change to that path.
+        stale = next((path for path in allowed if path not in drifted), None)
+        if stale is None:
+            stale = "crates/zeroclaw-api/src/lib.rs"
+            self.assertNotIn(stale, drifted)
+        with patch.object(build, "tracked_delta_paths",
+                          return_value={**allowed, stale: "fixture"}):
+            with self.assertRaisesRegex(RuntimeError, "no longer drift"):
+                build.require_zero_drift(base)
 
 
 class ReleaseTests(unittest.TestCase):

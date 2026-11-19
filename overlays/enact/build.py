@@ -18,6 +18,11 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "target/enact"
 SOURCE = OUT / "source"
+# The overlay file store holds whole-file fork versions of upstream-owned
+# files. The tracked tree keeps upstream's bytes; the store holds the fork's.
+# `prepare()` copies the store over the prepared tree, so fork text exists
+# only here and in the ephemeral build output -- never in the tracked tree.
+FILE_STORE = ROOT / "overlays/enact/files"
 PUBLIC_BUILD_HOME = "/build/home"
 # Always + External only. OptIn SaaS/coding-cli adapters stay out of the ship set for now.
 NATIVE_FEATURES = ("agent-runtime", "tools-external")
@@ -45,6 +50,92 @@ def source_provenance():
             "forkCommit": fork, "forkWorkingTreeDirty": dirty}
 
 
+def upstream_drift(base):
+    """List the upstream-owned paths the tracked tree has modified.
+
+    The fork's own additions are not drift: a file upstream never had has no
+    upstream version to drift from, and the fork's CI, its web code and its
+    release gates are the fork's to own. What must not happen is a file
+    upstream owns carrying the fork's text in the tracked tree, because an
+    upstream merge then has to fight that text.
+
+    The overlay file store is the way out for the files whose consumer is the
+    prepared tree. The CI, web, documentation and configuration files are
+    read by tools that run in the tracked tree, so their delta is recorded
+    here and reviewed rather than silently overlaid.
+    """
+    changed = subprocess.check_output(
+        ["git", "diff", "--name-only", "-z", base, "--", ".", ":(exclude)overlays/"],
+        cwd=ROOT,
+    ).decode().split("\0")
+    upstream_paths = set(
+        subprocess.check_output(
+            ["git", "ls-tree", "-r", "--name-only", "-z", base], cwd=ROOT
+        ).decode().split("\0")
+    )
+    return sorted(
+        path for path in filter(None, changed)
+        if path in upstream_paths
+    )
+
+
+def tracked_delta_paths():
+    """The reviewed list of upstream-owned files the fork keeps modified.
+
+    The overlay file store reaches the prepared tree only. A file that the
+    tracked tree's own tooling reads -- GitHub Actions, the scripts/ci suite,
+    the web build, the installer, the docs gate, cargo-deny -- has to keep
+    its fork text in the tracked tree. This list records those paths and the
+    reason each one cannot be overlaid.
+    """
+    payload = json.loads((ROOT / "overlays/enact/tracked-delta.json").read_text())
+    entries = payload["paths"]
+    recorded = {}
+    for entry in entries:
+        path = entry["path"]
+        if path in recorded:
+            raise RuntimeError(f"Tracked-delta list names {path} twice")
+        if not entry.get("reason"):
+            raise RuntimeError(f"Tracked-delta entry for {path} has no reason")
+        recorded[path] = entry["reason"]
+    return recorded
+
+
+def require_zero_drift(base):
+    """Refuse to release with an unreviewed upstream-owned delta.
+
+    Every upstream-owned file that carries fork text in the tracked tree is
+    named in `overlays/enact/tracked-delta.json` with the reason it cannot
+    be overlaid. A path that drifts and is not on that list is an
+    unreviewed change to an upstream file, and the release stops.
+    """
+    allowed = tracked_delta_paths()
+    drifted = upstream_drift(base)
+    unreviewed = [path for path in drifted if path not in allowed]
+    if unreviewed:
+        listing = "\n".join(f"  {path}" for path in unreviewed)
+        raise RuntimeError(
+            "Upstream-owned files carry fork text in the tracked tree and are "
+            "not on the reviewed tracked-delta list:\n"
+            f"{listing}\n"
+            "Move a file into overlays/enact/files/ when its only consumer is "
+            "the prepared tree. Otherwise add it to "
+            "overlays/enact/tracked-delta.json with the reason it cannot be "
+            "overlaid."
+        )
+    stale = [path for path in allowed if path not in drifted]
+    if stale:
+        listing = "\n".join(f"  {path}" for path in sorted(stale))
+        raise RuntimeError(
+            "The reviewed tracked-delta list names paths that no longer drift "
+            "from the pinned upstream base:\n"
+            f"{listing}\n"
+            "Remove them: a path that matches upstream again does not need a "
+            "waiver, and a stale waiver hides a future change to it."
+        )
+    return drifted
+
+
 def require_committed_release():
     provenance = source_provenance()
     if provenance["forkWorkingTreeDirty"]:
@@ -52,6 +143,7 @@ def require_committed_release():
     origin = subprocess.check_output(["git", "remote", "get-url", "origin"], cwd=ROOT, text=True).strip()
     if origin != provenance["upstreamRepository"]:
         raise RuntimeError("Release requires origin to remain the configured upstream repository")
+    require_zero_drift(provenance["upstreamCommit"])
     return provenance
 
 
@@ -2247,6 +2339,91 @@ def project_enact_hook_wit_input_inventory(source):
     replace_required(tests, old, new)
 
 
+def overlay_file_store(source):
+    """Install the fork's whole-file versions over the prepared tree.
+
+    Some upstream-owned files need more than an anchored edit: the fork's
+    version of a file is not upstream's file with a replacement in it, it is a
+    different file. A shared JSON-RPC transport, a rewritten CI workflow and a
+    fork-specific release gate are all of that kind. For those files the
+    tracked tree keeps upstream's bytes and the fork's bytes live here, under
+    the file's own repo-relative path.
+
+    The store is applied to the prepared tree only. The tracked tree stays
+    upstream's for every path the store names, which is what lets an upstream
+    merge land without the fork's file text fighting it. The prepared tree is
+    what the release ships.
+
+    This runs before every projection, because the projections anchor on
+    upstream's text. A projection that expects an upstream anchor must see
+    upstream's anchor, so the store's file has to be the one the projection
+    edits -- not the other way round.
+
+    A store path that names a file the prepared tree does not have is a
+    fork-new file and is created. A store path that escapes the repository
+    root is rejected rather than resolved.
+    """
+    if not FILE_STORE.is_dir():
+        return
+    for entry in sorted(FILE_STORE.rglob("*")):
+        if entry.is_dir():
+            continue
+        relative = entry.relative_to(FILE_STORE)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError(f"Overlay file store path escapes the repository: {relative}")
+        if relative.name == "README.md":
+            # The store's own documentation describes the mechanism; it is not
+            # a file the prepared tree carries.
+            continue
+        target = source / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(entry, target)
+
+
+def project_enact_bedrock_imds_optout(source):
+    """Let an operator keep the Bedrock provider off the metadata service.
+
+    The AWS SDKs honour `AWS_EC2_METADATA_DISABLED`, and the IMDS address is
+    not exclusively AWS's: a GitHub-hosted runner is an Azure VM, and that
+    address answers with something that is not an AWS metadata document. The
+    SDK then hangs on a response it cannot use, and the credential path
+    reports a timeout instead of the missing credential it actually has.
+
+    Skipping the service keeps the failure on the missing credential, which is
+    what the credential path is supposed to report, and it lets the fork's
+    hosted CI exercise the provider's own credential handling.
+
+    The opt-out is read from the environment, so it is off unless an operator
+    or a CI job sets it. The anchor is the function's own signature, which
+    upstream carries exactly once.
+    """
+    bedrock = source / "crates/zeroclaw-providers/src/bedrock.rs"
+    if "AWS_EC2_METADATA_DISABLED" in bedrock.read_text():
+        raise RuntimeError(
+            "Upstream overlay drift: the metadata opt-out is already projected in "
+            f"{bedrock}"
+        )
+    old = "    async fn from_imds() -> anyhow::Result<Self> {\n"
+    new = (
+        "    async fn from_imds() -> anyhow::Result<Self> {\n"
+        "        // The AWS SDKs honour this flag, and the metadata address is not\n"
+        "        // exclusively AWS's: a GitHub-hosted runner is an Azure VM where the\n"
+        "        // address answers with something that is not an AWS metadata\n"
+        "        // document. Skipping the service keeps the failure on the missing\n"
+        "        // credential, which is what the credential path is supposed to\n"
+        "        // report.\n"
+        "        if std::env::var(\"AWS_EC2_METADATA_DISABLED\")\n"
+        "            .map(|value| !matches!(value.trim(), \"\" | \"0\" | \"false\" | \"FALSE\" | \"False\"))\n"
+        "            .unwrap_or(false)\n"
+        "        {\n"
+        "            anyhow::bail!(\n"
+        "                \"EC2 instance metadata access is disabled, so no instance credentials are available\"\n"
+        "            );\n"
+        "        }\n"
+    )
+    replace_required(bedrock, old, new)
+
+
 def manifest():
     brand = json.loads((ROOT / "overlays/enact/brand.json").read_text())
     if not re.fullmatch(r"[a-z][a-z0-9-]*", brand["command"]):
@@ -2556,6 +2733,18 @@ def project_enact_upstream_clippy_fixes(source):
         source / "crates/zeroclaw-infra/src/acp_session_store.rs",
         "                        && !text.as_deref().is_some_and(|text| !text.is_empty())\n",
         "                        && text.as_deref().is_none_or(|text| text.is_empty())\n",
+    )
+
+    # The provider crate's word-boundary test borrows a function item where
+    # the closure trait is what the call wants. Current Clippy reads the
+    # borrow as a needless one. The fix belongs here, in the prepared tree,
+    # because the tracked tree has to keep upstream's bytes.
+    providers = source / "crates/zeroclaw-providers/src/lib.rs"
+    replace_count_required(
+        providers,
+        ".is_some_and(&is_word_char);",
+        ".is_some_and(is_word_char);",
+        2,
     )
 
     config_manager = source / "apps/zerocode/src/config_manager.rs"
@@ -7940,6 +8129,11 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
     if not committed and (ROOT / "web/dist/index.html").is_file():
         shutil.copytree(ROOT / "web/dist", SOURCE / "web/dist", dirs_exist_ok=True)
 
+    # The overlay file store holds whole-file fork versions of upstream-owned
+    # files. It lands before the projections, because a projection anchors on
+    # upstream's text and has to see that text, not the fork's file.
+    overlay_file_store(SOURCE)
+
     project_enact_builtin_docs_skill(SOURCE)
     project_enact_mcp_server(SOURCE)
     project_enact_declarative_hooks(SOURCE)
@@ -7955,6 +8149,7 @@ def prepare(cargo="cargo", committed=False, revision="HEAD"):
     project_enact_coordination(SOURCE)
     project_enact_turn_control(SOURCE)
     project_enact_upstream_clippy_fixes(SOURCE)
+    project_enact_bedrock_imds_optout(SOURCE)
     project_enact_plugin_hooks(SOURCE)
     project_enact_branding_consistency(SOURCE)
     project_enact_builtin_selection_fixture(SOURCE)
