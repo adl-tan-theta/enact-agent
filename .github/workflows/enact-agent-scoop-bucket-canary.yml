@@ -1,0 +1,98 @@
+name: Enact Agent Scoop Bucket Canary
+
+# Disabled in the Enact fork.
+#
+# This workflow rehearses the publish path for the upstream `zeroclaw` Scoop
+# bucket, using an account-bound token the fork does not hold.
+#
+# The Enact distribution is not published through Scoop: it ships through the
+# GitHub releases in adl-tan-theta/enact-agent, which the install script and
+# the Homebrew tap point at.
+#
+# The weekly schedule is kept, and the rehearsal still runs, but as a *generic*
+# dry run rather than a credential canary. The credential gate in
+# `scripts/release/scoop_credential_gate.sh` treats a dry run with no bucket
+# repository and no token as a skip, so the weekly run completes cleanly here
+# and says why, rather than failing on a credential the fork will never hold.
+# A red canary would then mean "the credential rotted", when here it would
+# only mean "the fork publishes no bucket".
+#
+# The disposition is explicit rather than silent: if a Scoop bucket is added
+# for the Enact distribution, set `SCOOP_BUCKET_REPO`, add the secret
+# `SCOOP_BUCKET_TOKEN`, and switch `credential_canary` back to `true` to get
+# the credential-rot rehearsal back.
+
+# Rehearses the Scoop publish path against the current stable release without
+# touching the bucket.
+#
+# SCOOP_BUCKET_TOKEN is account-bound, so it expires and it silently loses
+# write when the owning identity's collaborator grant changes. Historically the
+# only thing that exercised it was the `scoop` job in Release Stable, which runs
+# after `publish`, so a dead credential was discovered once the release had
+# already been cut and announced and the bucket then had to be updated by hand.
+# Running the rehearsal weekly surfaces a dead credential between releases,
+# while there is still time to rotate it.
+#
+# This detects credential rot; it is not what keeps the bucket correct. A
+# bucket-side Excavator backstop is proposed in zeroclaw-labs/scoop-zeroclaw#1,
+# but it is not operational until that workflow lands, receives write
+# permission, and passes a maintainer smoke test. Until then, recover a failed
+# publish by rotating the credential and rerunning the publisher.
+
+on:
+  schedule:
+    - cron: "23 7 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: scoop-canary-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  latest-release:
+    name: Resolve Current Release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - name: Resolve latest stable release tag
+        id: resolve
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq '.tagName')"
+
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::latest release is not a stable vX.Y.Z tag: ${tag}"
+            exit 1
+          fi
+
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "Rehearsing the Scoop publish path against ${tag}." >> "$GITHUB_STEP_SUMMARY"
+
+  rehearse:
+    name: Rehearse Scoop Publish
+    needs: latest-release
+    uses: ./.github/workflows/pub-scoop.yml
+    with:
+      release_tag: ${{ needs.latest-release.outputs.tag }}
+      dry_run: true
+      # The fork publishes no Scoop bucket, so there is no bucket credential to
+      # rehearse. `scripts/release/scoop_credential_gate.sh` treats a generic
+      # dry run with no bucket repository and no token as a skip, so the
+      # weekly run completes cleanly here and states why, instead of failing
+      # on a credential the fork will never hold.
+      #
+      # When a Scoop bucket is added for the Enact distribution, set the
+      # repository variable `SCOOP_BUCKET_REPO`, add the secret
+      # `SCOOP_BUCKET_TOKEN`, and switch this back to
+      # `credential_canary: true` to get the credential-rot rehearsal.
+      credential_canary: false
+    secrets:
+      SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}

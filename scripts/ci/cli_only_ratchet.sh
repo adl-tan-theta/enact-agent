@@ -54,15 +54,7 @@ check() {
 
 run() {
   local target="$1" binary="$2" features
-  # The caller may pass the feature list it already resolved. Recomputing it
-  # means building the `xtask` binary, which cost 5m08s on a 4-vCPU runner
-  # and pushed this job past its timeout even though every other step had
-  # finished.
-  if [ "$#" -ge 3 ] && [ -n "${3:-}" ]; then
-    features="$3"
-  else
-    features="$(cargo run --quiet --locked -p xtask --bin generate -- features --selection cli-only --target "$target")"
-  fi
+  features="$(cargo run --quiet --locked -p xtask --bin generate -- features --selection cli-only --target "$target")"
   work="$(mktemp -d)"
   cargo tree --locked --target "$target" -e normal --prefix none -p zeroclaw \
     --no-default-features --features "$features" | sort -u > "$work/tree.txt"
@@ -87,7 +79,7 @@ case "${1:-}" in
     check "$@"
     ;;
   *)
-    echo "usage: $0 run <target-triple> <binary> [features] | check <tree> <axum-dependents> <symbols>" >&2
+    echo "usage: $0 run <target-triple> <binary> | check <tree> <axum-dependents> <symbols>" >&2
     exit 2
     ;;
 esac

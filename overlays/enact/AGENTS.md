@@ -16,7 +16,7 @@ Read the relevant owner before changing behavior or documenting a claim.
 | [release.json](release.json) | Distribution version, upstream/fork repository URLs, pinned upstream source base |
 | [build.py](build.py) | Prepared-source transformations, native feature selection, provenance, archive and privacy guards |
 | [files/](files/) | Whole-file fork versions of upstream-owned files, applied to the prepared tree only |
-| [tracked-delta.json](tracked-delta.json) | Reviewed record of upstream-owned files the fork keeps modified in the tracked tree, with the reason each cannot be overlaid |
+| [deny.toml](deny.toml) | The fork's advisory policy, passed with `cargo deny --config` |
 | [Cargo.toml](../../Cargo.toml) and [Cargo.lock](../../Cargo.lock) | Upstream runtime version, declared Rust floor, feature definitions, locked dependencies |
 | [probe_native.py](probe_native.py) and [test_build.py](test_build.py) | Native boundary qualification and focused overlay checks |
 | [native workflow](../../.github/workflows/enact-agent-native-build.yml) | Native runner matrix on every push to the integration branch, selected toolchain, extracted-archive fixture |
@@ -37,18 +37,18 @@ successful compile as proof that a release asset exists or passes its fixture.
   Upstream's own `master` rules govern upstream's repository, not this fork.
 - Keep fork-only native branding/RPC adaptations in `build.py`, not tracked
   `src/` or `crates/` Rust. Upstream merges may update upstream Rust normally.
-- An upstream-owned file the fork replaces wholesale belongs in
-  [`files/`](files/), not in the tracked tree: `prepare()` copies the store over
-  the prepared tree, so the tracked file keeps upstream's bytes and an upstream
-  merge does not have to fight the fork's text. The tracked copy of a stored
-  path must equal the pinned base, and the release gate checks that.
-- The store reaches the prepared tree only. It cannot reach the tracked tree,
-  and the tracked tree is where GitHub Actions, the `scripts/ci` suite, the web
-  build, `install.sh`, the docs gate and `cargo deny` read from. Those files
-  keep their fork text in the tracked tree, and
-  [`tracked-delta.json`](tracked-delta.json) records each one with the reason
-  it cannot be overlaid. A new upstream-owned delta stops the release until
-  someone adds it to that list on purpose.
+- **The fork owns no upstream file.** Every file upstream ships is
+  byte-identical to the pinned base in the tracked tree. The fork's version
+  of an upstream file lives in [`files/`](files/), applied to the prepared
+  tree by `prepare()`, or is an anchored projection in `build.py`.
+- The store reaches the prepared tree only, and the tracked tree is where
+  GitHub Actions, the `scripts/ci` suite, the web build, the installer, the
+  docs gate and `cargo deny` read from. Where those need the fork's
+  behaviour, the fork owns a *different* file: its own workflow names, its
+  own script copies under `scripts/ci/enact/`, its own policy file passed
+  with `cargo deny --config`. The stock file stays upstream's.
+- A file upstream never had is the fork's own and stays tracked: the fork's
+  workflows, its own CI scripts and its own release gates.
 - `prepare` deletes/recreates `target/enact/source/`. Never hand-edit this output
   as the durable fix, commit binaries, or prepare/build concurrently in one worktree.
 - Tracked `web/` changes cover Enact presentation, canonical assets and brand
@@ -229,18 +229,18 @@ git diff --exit-code "$upstream_base" -- src crates Cargo.toml Cargo.lock
 This check is clean for the published `.1` source. Stop review on unexpected
 fork-only core differences; investigate rather than rewriting files automatically.
 
-The whole tracked tree is checked too, against the reviewed list of files the
-fork keeps modified on purpose:
+The whole tracked tree is checked too, and the rule is absolute: no waiver
+list, no exceptions.
 
 ```sh
 python3 -c 'import sys; sys.path.insert(0, "overlays/enact"); import build; \
   build.require_zero_drift(build.release_manifest()["upstreamCommit"])'
 ```
 
-This names every upstream-owned file that carries fork text outside the
-reviewed list, and every waiver that no longer matches a real difference. The
-release gate runs the same check, so an unreviewed delta stops the release
-rather than shipping.
+This names every upstream-owned file that carries fork text in the tracked
+tree. A file upstream never had is the fork's own and is not reported. The
+release gate runs the same check, so any upstream-owned delta stops the
+release rather than shipping.
 
 ## Validation and release gate
 

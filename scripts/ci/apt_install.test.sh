@@ -133,8 +133,8 @@ new_fixture success
 run_helper libudev-dev ripgrep
 assert_call_count "$calls" 1 'apt-get|update|-qq'
 assert_call_count "$calls" 1 'apt-get|install|-y|libudev-dev|ripgrep'
-assert_contains "$output" 'apt refresh: attempt 1/3 started (deadline: 300s)'
-assert_contains "$output" 'apt install: attempt 1/3 succeeded'
+assert_contains "$output" 'apt refresh: attempt 1/2 started (deadline: 120s)'
+assert_contains "$output" 'apt install: attempt 1/2 succeeded'
 [[ ! -e "${fixture}/sources/azure-cli.sources" ]] || \
     fail "Azure source was not removed"
 [[ ! -e "${fixture}/sources/microsoft-prod.list" ]] || \
@@ -148,24 +148,24 @@ fail_attempts=1
 run_helper libudev-dev
 assert_call_count "$calls" 2 'apt-get|update|-qq'
 assert_call_count "$calls" 1 'sleep|5'
-assert_contains "$output" 'apt refresh: attempt 1/3 failed (status: 42)'
+assert_contains "$output" 'apt refresh: attempt 1/2 failed (status: 42)'
 assert_contains "$output" 'apt refresh: retrying after 5s'
-assert_contains "$output" 'apt refresh: attempt 2/3 succeeded'
+assert_contains "$output" 'apt refresh: attempt 2/2 succeeded'
 unset fail_phase fail_attempts
 
 new_fixture transient_timeout
 timeout_phase=install
 timeout_attempts=1
 run_helper libudev-dev
-assert_call_count "$calls" 2 'timeout|--signal=TERM|--kill-after=10s|300s|apt-get|install|-y|libudev-dev'
+assert_call_count "$calls" 2 'timeout|--signal=TERM|--kill-after=10s|120s|apt-get|install|-y|libudev-dev'
 assert_call_count "$calls" 1 'apt-get|install|-y|libudev-dev'
-assert_contains "$output" 'apt install: attempt 1/3 timed out (status: 124)'
-assert_contains "$output" 'apt install: attempt 2/3 succeeded'
+assert_contains "$output" 'apt install: attempt 1/2 timed out (status: 124)'
+assert_contains "$output" 'apt install: attempt 2/2 succeeded'
 unset timeout_phase timeout_attempts
 
 new_fixture permanent_install_failure
 fail_phase=install
-fail_attempts=3
+fail_attempts=2
 set +e
 run_helper libudev-dev ripgrep
 status=$?
@@ -173,14 +173,14 @@ set -e
 if [[ "$status" -ne 42 ]]; then
     fail "permanent install failure should exit 42, got $status"
 fi
-assert_call_count "$calls" 3 'apt-get|install|-y|libudev-dev|ripgrep'
-assert_contains "$output" 'apt install: attempt 3/3 failed (status: 42)'
-assert_contains "$output" 'apt install: failed after 3 attempts (last status: 42)'
+assert_call_count "$calls" 2 'apt-get|install|-y|libudev-dev|ripgrep'
+assert_contains "$output" 'apt install: attempt 2/2 failed (status: 42)'
+assert_contains "$output" 'apt install: failed after 2 attempts (last status: 42)'
 unset fail_phase fail_attempts
 
 new_fixture permanent_timeout
 timeout_phase=update
-timeout_attempts=3
+timeout_attempts=2
 set +e
 run_helper libudev-dev
 status=$?
@@ -188,9 +188,9 @@ set -e
 if [[ "$status" -ne 124 ]]; then
     fail "permanent timeout should exit 124, got $status"
 fi
-assert_call_count "$calls" 3 'timeout|--signal=TERM|--kill-after=10s|300s|apt-get|update|-qq'
+assert_call_count "$calls" 2 'timeout|--signal=TERM|--kill-after=10s|120s|apt-get|update|-qq'
 assert_call_count "$calls" 0 'apt-get|update|-qq'
-assert_contains "$output" 'apt refresh: failed after 3 attempts (last status: 124)'
+assert_contains "$output" 'apt refresh: failed after 2 attempts (last status: 124)'
 unset timeout_phase timeout_attempts
 
 echo "apt install timeout/retry tests: pass"

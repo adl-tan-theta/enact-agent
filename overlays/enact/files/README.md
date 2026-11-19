@@ -25,24 +25,28 @@ fails closed when upstream drifts.
 
 ## When a file cannot belong here
 
-The store reaches the prepared tree only. It does not reach the tracked tree,
-and the tracked tree is where these read from:
+The store reaches the prepared tree only. It does not reach the tracked tree.
 
-- GitHub Actions reads `.github/workflows/*.yml`.
-- The CI jobs run `scripts/ci/*`.
-- The web build and the web tests read `web/`.
-- `tests/architecture/enact_release.rs` reads `install.sh`.
-- `cargo deny` reads `deny.toml`.
-- The docs gate reads `docs/book/`.
+The fork therefore never keeps fork text in a file upstream owns. Where the
+tracked tree's own tooling needs the fork's behaviour, the fork owns a
+*different* file and the stock one stays upstream's:
 
-Those files keep their fork text in the tracked tree, and
-[`../tracked-delta.json`](../tracked-delta.json) records each one with the
-reason it cannot be overlaid.
+| The tracked tree reads | The fork's own copy |
+| --- | --- |
+| `.github/workflows/ci.yml` | `.github/workflows/enact-agent-quality-gate.yml` |
+| `scripts/ci/apt_install.sh` | `scripts/ci/enact/apt_install.sh` |
+| `web/src/lib/branding.ts` | `overlays/enact/files/web/src/lib/branding.ts` |
+| `install.sh` | `overlays/enact/files/install.sh` |
+| `deny.toml` | `overlays/enact/deny.toml`, passed with `cargo deny --config` |
+
+A file upstream never had is the fork's own, and it stays tracked: the
+fork's workflows, its own CI scripts and its own release gates.
 
 ## Rules
 
 - The tracked copy of a stored path must equal the pinned upstream base, byte
-  for byte. `test_build.py` enforces this.
+  for byte, or the path must not be tracked at all. `test_build.py` enforces
+  this.
 - The store is applied before the projections, because a projection anchors on
   upstream's text and has to see that text.
 - A stored path that the prepared tree does not have is created. A stored

@@ -53,43 +53,43 @@ const RUNNER_LABEL: &str = "ubuntu-24.04";
 /// Workflow-qualified IDs keep same-named jobs in different workflows distinct.
 const FLEET_JOBS: [&str; 32] = [
     // Compile-heavy: these need the machine.
-    "ci.yml/lint",
-    "ci.yml/build",
-    "ci.yml/check",
-    "ci.yml/check-plugin-backends",
-    "ci.yml/msrv",
-    "ci.yml/check-32bit",
-    "ci.yml/bench",
-    "ci.yml/test",
-    "ci.yml/test-channel-features",
-    "ci.yml/test-tool-features",
-    "ci.yml/test-cli-only",
-    "ci.yml/memory-postgres-test",
-    "ci.yml/parallel-runtime-test",
-    "ci.yml/installer-drift",
+    "enact-agent-quality-gate.yml/lint",
+    "enact-agent-quality-gate.yml/build",
+    "enact-agent-quality-gate.yml/check",
+    "enact-agent-quality-gate.yml/check-plugin-backends",
+    "enact-agent-quality-gate.yml/msrv",
+    "enact-agent-quality-gate.yml/check-32bit",
+    "enact-agent-quality-gate.yml/bench",
+    "enact-agent-quality-gate.yml/test",
+    "enact-agent-quality-gate.yml/test-channel-features",
+    "enact-agent-quality-gate.yml/test-tool-features",
+    "enact-agent-quality-gate.yml/test-cli-only",
+    "enact-agent-quality-gate.yml/memory-postgres-test",
+    "enact-agent-quality-gate.yml/parallel-runtime-test",
+    "enact-agent-quality-gate.yml/installer-drift",
     // Housekeeping: formatting, change detection, repository guards, docs and
     // policy gates, the Nix checks, the container smoke, the Windows-test
     // selector, and the required-gate aggregator.
-    "ci.yml/fmt",
-    "ci.yml/crates-preflight-changes",
-    "ci.yml/master-debounce",
-    "ci.yml/gate",
-    "ci.yml/history-guard",
-    "ci.yml/repo-structure",
-    "ci.yml/docs-style",
-    "ci.yml/zerocode-rpc-boundary",
-    "ci.yml/parallel-runtime-test-changes",
-    "ci.yml/path-changes",
-    "ci.yml/relay-container-smoke-changes",
-    "ci.yml/nix-eval",
-    "ci.yml/nix-hash-drift",
-    "ci.yml/relay-container-smoke",
-    "ci.yml/security",
-    "ci.yml/web-permission-tests",
-    "windows-tests.yml/windows-test-scope",
+    "enact-agent-quality-gate.yml/fmt",
+    "enact-agent-quality-gate.yml/crates-preflight-changes",
+    "enact-agent-quality-gate.yml/master-debounce",
+    "enact-agent-quality-gate.yml/gate",
+    "enact-agent-quality-gate.yml/history-guard",
+    "enact-agent-quality-gate.yml/repo-structure",
+    "enact-agent-quality-gate.yml/docs-style",
+    "enact-agent-quality-gate.yml/zerocode-rpc-boundary",
+    "enact-agent-quality-gate.yml/parallel-runtime-test-changes",
+    "enact-agent-quality-gate.yml/path-changes",
+    "enact-agent-quality-gate.yml/relay-container-smoke-changes",
+    "enact-agent-quality-gate.yml/nix-eval",
+    "enact-agent-quality-gate.yml/nix-hash-drift",
+    "enact-agent-quality-gate.yml/relay-container-smoke",
+    "enact-agent-quality-gate.yml/security",
+    "enact-agent-quality-gate.yml/web-permission-tests",
+    "enact-agent-windows-tests.yml/windows-test-scope",
     // A reusable-workflow caller: it has no `runs-on` of its own and hands the
     // label to the called workflow.
-    "ci.yml/crates-preflight",
+    "enact-agent-quality-gate.yml/crates-preflight",
 ];
 
 /// Jobs that stay on GitHub-hosted `ubuntu-latest` because they depend on the
@@ -142,13 +142,13 @@ const ALLOWED_CACHE_INPUTS: [&str; 1] = ["'false'"];
 
 fn ci_workflow() -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    fs::read_to_string(root.join(".github/workflows/ci.yml"))
-        .expect("failed to read .github/workflows/ci.yml")
+    fs::read_to_string(root.join(".github/workflows/enact-agent-quality-gate.yml"))
+        .expect("failed to read .github/workflows/enact-agent-quality-gate.yml")
 }
 
 fn runner_workflow_jobs() -> BTreeMap<String, String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows");
-    ["ci.yml", "windows-tests.yml"]
+    ["enact-agent-quality-gate.yml", "enact-agent-windows-tests.yml"]
         .into_iter()
         .flat_map(|filename| {
             let workflow = fs::read_to_string(root.join(filename))
@@ -264,13 +264,13 @@ fn the_fleet_inventory_covers_every_compile_and_reusable_job() {
 
     for name in COMPILE_JOBS {
         assert!(
-            fleet.contains(&format!("ci.yml/{name}").as_str()),
+            fleet.contains(&format!("enact-agent-quality-gate.yml/{name}").as_str()),
             "the compile job {name} must be in FLEET_JOBS"
         );
     }
     for name in REUSABLE_COMPILE_JOBS {
         assert!(
-            fleet.contains(&format!("ci.yml/{name}").as_str()),
+            fleet.contains(&format!("enact-agent-quality-gate.yml/{name}").as_str()),
             "the reusable compile job {name} must be in FLEET_JOBS"
         );
     }
@@ -346,7 +346,7 @@ fn the_required_gate_carries_no_windows_runner() {
         Regex::new(r"(?m)^\s*(?:runs-on|os):.*windows").expect("valid runner-label pattern");
     let claiming: BTreeSet<&str> = blocks
         .iter()
-        .filter(|(name, _)| name.starts_with("ci.yml/"))
+        .filter(|(name, _)| name.starts_with("enact-agent-quality-gate.yml/"))
         .filter(|(_, block)| windows_label.is_match(block))
         .map(|(name, _)| name.as_str())
         .collect();
@@ -440,7 +440,7 @@ fn hosted_linux_stays_an_explicit_allowlist() {
         .collect();
     let declared: BTreeSet<String> = HOSTED_LINUX_JOBS
         .into_iter()
-        .map(|name| format!("ci.yml/{name}"))
+        .map(|name| format!("enact-agent-quality-gate.yml/{name}"))
         .collect();
 
     assert_eq!(

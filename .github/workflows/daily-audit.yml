@@ -1,16 +1,8 @@
 name: Daily Advisory Scan
 
-# Disabled in the Enact fork.
-#
-# This workflow scans the upstream ZeroClaw Cargo dependency graph. The fork
-# ships its own pinned dependency set and its own release artifacts, so the
-# upstream scan reports on a lockfile this fork does not use. It fails on
-# every run for that reason.
-#
-# The disposition is explicit rather than silent: if the fork's dependency
-# surface changes materially, this workflow must be re-enabled and pointed
-# at the fork's own lockfile.
 on:
+  schedule:
+    - cron: "0 9 * * *"
   workflow_dispatch:
 
 concurrency:

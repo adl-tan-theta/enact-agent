@@ -1,18 +1,14 @@
 name: Scheduled Platform Tests
 
-# Scheduled runs disabled in the Enact fork.
-#
-# The scheduled leg runs the upstream platform matrix against the upstream
-# release artifacts, which the fork does not ship; it fails on every
-# scheduled run for that reason. The pull-request leg still runs on the
-# fork's own branch and is left alone.
 on:
   pull_request:
-    branches: [master, enact/branding]
+    branches: [master]
     paths:
       - ".github/workflows/platform-tests.yml"
       - "crates/zeroclaw-tools/src/coding_cli.rs"
   workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}

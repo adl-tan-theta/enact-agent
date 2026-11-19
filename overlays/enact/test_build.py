@@ -1393,75 +1393,56 @@ class OverlayFileStoreTests(unittest.TestCase):
                 )
 
 
-class TrackedDeltaGateTests(unittest.TestCase):
-    """The tracked-delta list is a reviewed record, not a blanket waiver.
+class ZeroDriftGateTests(unittest.TestCase):
+    """The fork owns no upstream file.
 
-    Every upstream-owned file the fork keeps modified is named with the
-    reason it cannot be overlaid. The gate has to fail closed in both
-    directions: an unreviewed delta stops the release, and a stale waiver
-    stops the release too, because a waiver for a path that matches upstream
-    again would hide the next change to it.
+    Every file upstream ships is byte-identical to the pinned upstream base in
+    the tracked tree. The fork's version of an upstream file lives in the
+    overlay file store, where `prepare()` applies it to the prepared tree.
+
+    The gate has no waiver list, so it fails closed in one direction only: any
+    upstream-owned delta stops the release. A file upstream never had is the
+    fork's own and is not drift.
     """
 
-    def test_the_delta_list_names_a_reason_for_every_path(self):
-        allowed = build.tracked_delta_paths()
-        self.assertTrue(allowed, "the tracked-delta list is empty")
-        for path, reason in allowed.items():
-            with self.subTest(path=path):
-                self.assertTrue(reason.strip(), f"{path} has no reason")
-
-    def test_the_delta_list_has_no_duplicates(self):
-        payload = json.loads((build.ROOT / "overlays/enact/tracked-delta.json").read_text())
-        paths = [entry["path"] for entry in payload["paths"]]
-        self.assertEqual(len(paths), len(set(paths)))
-
-    def test_the_tracked_tree_matches_the_reviewed_list(self):
+    def test_the_tracked_tree_carries_no_upstream_owned_delta(self):
         base = build.release_manifest()["upstreamCommit"]
         drifted = build.upstream_drift(base)
-        allowed = build.tracked_delta_paths()
-        unreviewed = [path for path in drifted if path not in allowed]
         self.assertEqual(
-            unreviewed,
+            drifted,
             [],
-            "upstream-owned files carry fork text without a reviewed reason: "
-            + ", ".join(unreviewed),
-        )
-        stale = [path for path in allowed if path not in drifted]
-        self.assertEqual(
-            stale,
-            [],
-            "the tracked-delta list waives paths that match upstream again: "
-            + ", ".join(stale),
+            "upstream-owned files carry fork text in the tracked tree: "
+            + ", ".join(drifted),
         )
 
-    def test_an_unreviewed_delta_fails_the_gate(self):
+    def test_the_gate_passes_on_the_current_tree(self):
         base = build.release_manifest()["upstreamCommit"]
-        upstream = subprocess.check_output(
-            ["git", "show", f"{base}:crates/zeroclaw-api/src/lib.rs"], cwd=build.ROOT
+        self.assertEqual(build.require_zero_drift(base), [])
+
+    def test_a_fork_new_file_is_not_drift(self):
+        base = build.release_manifest()["upstreamCommit"]
+        drifted = build.upstream_drift(base)
+        self.assertNotIn(
+            "tests/architecture/enact_release.rs",
+            drifted,
+            "a file upstream never had is the fork's own, not drift",
         )
+
+    def test_an_upstream_owned_delta_fails_the_gate(self):
+        base = build.release_manifest()["upstreamCommit"]
         target = build.ROOT / "crates/zeroclaw-api/src/lib.rs"
         original = target.read_bytes()
         try:
-            target.write_bytes(original + b"\n// unreviewed fork text\n")
-            with self.assertRaisesRegex(RuntimeError, "tracked-delta list"):
+            target.write_bytes(original + b"\n// fork text in an upstream file\n")
+            with self.assertRaisesRegex(RuntimeError, "Upstream-owned files carry fork text"):
                 build.require_zero_drift(base)
         finally:
             target.write_bytes(original)
 
-    def test_a_stale_waiver_fails_the_gate(self):
+    def test_a_fork_new_path_is_not_drift(self):
         base = build.release_manifest()["upstreamCommit"]
-        allowed = build.tracked_delta_paths()
         drifted = build.upstream_drift(base)
-        # A waiver for a path that matches upstream again is stale: it would
-        # hide the next change to that path.
-        stale = next((path for path in allowed if path not in drifted), None)
-        if stale is None:
-            stale = "crates/zeroclaw-api/src/lib.rs"
-            self.assertNotIn(stale, drifted)
-        with patch.object(build, "tracked_delta_paths",
-                          return_value={**allowed, stale: "fixture"}):
-            with self.assertRaisesRegex(RuntimeError, "no longer drift"):
-                build.require_zero_drift(base)
+        self.assertNotIn("overlays/enact/deny.toml", drifted)
 
 
 class ReleaseTests(unittest.TestCase):

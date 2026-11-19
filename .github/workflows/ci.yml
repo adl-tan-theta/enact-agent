@@ -2,9 +2,9 @@ name: Quality Gate
 
 on:
   pull_request:
-    branches: [master, enact/branding]
+    branches: [master]
   push:
-    branches: [master, enact/branding]
+    branches: [master]
   # Merge queue: GitHub builds a temporary `gh-readonly-queue/master/…` branch
   # and fires `merge_group`. The required `CI Required Gate` must report on that
   # branch or queued PRs stall, so the full gate runs here too.
@@ -14,7 +14,7 @@ concurrency:
   # Merge-queue runs key on the unique queue ref (github.ref →
   # `refs/heads/gh-readonly-queue/master/pr-N-<sha>`) so speculative entries
   # never cancel each other; PRs still key on the PR number.
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-v2
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -28,38 +28,12 @@ env:
 # The Rust-compiling jobs below (lint, build, check, check-plugin-backends,
 # check-32bit, bench, test, test-channel-features, test-tool-features, test-cli-only, memory-postgres-test, msrv, parallel-runtime-test,
 # installer-drift) and the Linux `build` matrix entry name their runner label
-# directly, so runner selection does not wait for fmt. The build matrix
+# directly, so runner selection does not wait for fmt. The separate required
+# Windows jobs wait for windows-required-changes; the build matrix
 # waits only for the push debounce, which is skipped on PR and merge-queue events.
-# The required gate is Mac + Linux only: the Windows legs were removed, so the
-# gate does not spend runner budget on a platform this fork does not ship.
 # `tests/architecture/ci_runner_labels.rs` fails the workspace suite if those
 # labels or their cache-provider inputs drift apart, so moving the fleet stays
 # one reviewed edit even though the constant is written more than once.
-#
-# THIS FORK RUNS ON GITHUB-HOSTED RUNNERS. Upstream pins the compile fleet to
-# the Blacksmith fleet (`blacksmith-4vcpu-ubuntu-2404` /
-# `blacksmith-8vcpu-ubuntu-2404`) and that label only resolves where the
-# Blacksmith GitHub App is installed on an organisation. This fork lives under
-# a *user* account, `adl-tan-theta`, which has no organisation level to
-# inherit an app installation from, so every label of that form had no runner
-# behind it. The symptom was silent and total: run 44261582299 sat at
-# `pending` with zero jobs created, forever, and so did every run before it —
-# the Quality Gate had never produced a single job in this fork, which is why
-# its lint failures went unseen until they were found by running the gate's
-# jobs locally. A label with no runner does not fail; it waits, so the gate
-# looked "running" rather than "broken".
-#
-# The evidence that this was the cause and not account-level runner
-# exhaustion: on the same commit, the Enact native-build workflow ran five
-# GitHub-hosted jobs concurrently to completion, while the Quality Gate
-# created none. The Actions pool was not saturated; the label was wrong.
-#
-# The labels are therefore `ubuntu-24.04`, the GitHub-hosted image matching
-# the Ubuntu version upstream compiled on, so the toolchain and the crate
-# features are the same ones upstream's fleet used. Every rust-cache call
-# switches to `use-blacksmith: 'false'`, which selects the Swatinem/rust-cache
-# provider: the composite already implements that fallback, so the cache
-# keeps working without Blacksmith's sticky disk.
 #
 # WHY NOT read the label from a `fmt` output: `runs-on` resolves before a job is
 # created, so every compile job had to declare `needs: [fmt]` and wait for a
@@ -79,16 +53,20 @@ env:
 # a blacksmith-8vcpu runner, so Blacksmith serves fork PRs and only the
 # expression was blocking. See #7108.
 #
+# TRADE-OFF, deliberate: no `vars`-based switch can govern fork PRs, so there is
+# no longer a runtime kill switch for that path — rolling back is a one-line
+# commit here rather than flipping a repo variable.
+#
 # UNCHANGED SAFETY PROPERTY: every rust-cache call still passes
 # `save-if: github.ref == 'refs/heads/master'`, so fork PRs remain cache READERS
 # only and cannot poison the cache master seeds.
 #
-# PRECONDITION, for a fork that does have the Blacksmith app: Blacksmith
+# PRECONDITIONS: the Blacksmith GitHub App must stay installed on the org, or
+# these jobs queue with no runner (~24h) instead of failing fast. Blacksmith
 # triggerer SSH must remain DISABLED (Blacksmith → Settings → Features → SSH
 # Access) so a green required check attests only the reviewed commit; the
 # endpoint line in job logs is image-default with no authorized keys installed
-# and is not an exposure. This fork has no Blacksmith app, so that condition
-# does not apply here.
+# and is not an exposure.
 
 jobs:
   # ── Master-push debounce ─────────────────────────────────────────────────
@@ -106,7 +84,7 @@ jobs:
   master-debounce:
     name: Debounce master push
     if: github.event_name == 'push'
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
       - name: Wait for a newer push to supersede this run
@@ -125,7 +103,7 @@ jobs:
 
   fmt:
     name: Format
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -138,7 +116,7 @@ jobs:
 
   history-guard:
     name: Common Ancestor
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -154,7 +132,7 @@ jobs:
   # Guards the approved submodule layout introduced in PR #8516; see the bespoke gate registry in README.md.
   repo-structure:
     name: Repository Structure
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -254,7 +232,7 @@ jobs:
     # does not wait on `fmt`. Waiting would serialise its own multi-minute
     # GitHub-hosted queue wait AFTER fmt and push every dependent that far back.
     # See the ordering note above `fmt` for which dependents still wait on it.
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     outputs:
       run: ${{ steps.changed.outputs.run }}
@@ -300,7 +278,7 @@ jobs:
     name: Relay Container Fresh-Volume Smoke
     needs: [relay-container-smoke-changes]
     if: needs.relay-container-smoke-changes.outputs.run == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -323,26 +301,10 @@ jobs:
     name: Lint
     needs: [master-debounce]
     if: ${{ !cancelled() && needs.master-debounce.result != 'failure' }}
-    runs-on: ubuntu-24.04
-    # Upstream sized this ceiling on a Blacksmith `8vcpu` runner, where the job
-    # measured 10m40s. This fork runs the same job on GitHub-hosted
-    # `ubuntu-24.04` -- 4 vCPU, and a cold cache, because `adl-tan-theta` is a
-    # user account with no organisation to inherit a Blacksmith installation
-    # from. The clippy and rustdoc commands are byte-identical to upstream's;
-    # only the hardware differs, and halving the vCPU count roughly doubles the
-    # wall clock.
-    #
-    # A cold-cache run then proved more, which is exactly the condition the
-    # original note said to watch for. Run 44312419349 on 17597a598 measured
-    # clippy at 10m27s and rustdoc at 3m50s, and the job was still inside the
-    # comment-hygiene gate when it hit the 15m ceiling -- it needed roughly 17m.
-    # The clippy step alone now exceeds the old budget.
-    #
-    # 30 gives a cold run about 1.7x the time it actually needs, which leaves
-    # room for a slower mirror or a larger cache miss without the gate failing
-    # on a machine that was never broken. The ceiling is a backstop against a
-    # hung job, not a target.
-    timeout-minutes: 30
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    # Measured green run on b86b1737: rustdoc step 2m22s, total Lint 10m40s
+    # (under the prior 15m ceiling). Keep 15 unless a cold-cache run proves more.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -354,7 +316,7 @@ jobs:
       - uses: ./.github/actions/rust-cache
         id: rust-cache
         with:
-          use-blacksmith: 'false'
+          use-blacksmith: 'true'
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Install system dependencies
@@ -387,6 +349,184 @@ jobs:
       - name: act-local artifact compatibility tests
         run: bash scripts/dev/act-local.test.sh
 
+  windows-clippy-tools-changes:
+    name: Detect Windows Clippy changes
+    needs: [master-debounce]
+    if: ${{ !cancelled() && needs.master-debounce.result != 'failure' }}
+    # Ordering note: this detector only runs `git diff` and never compiles, so it
+    # does not wait on `fmt`. Waiting would serialise its own multi-minute
+    # GitHub-hosted queue wait AFTER fmt and push every dependent that far back.
+    # See the ordering note above `fmt` for which dependents still wait on it.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.changed.outputs.run }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Detect targeted Windows Clippy changes
+        id: changed
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          changed_files="$(mktemp)"
+
+          case "${{ github.event_name }}" in
+            pull_request)
+              # Shallow checkout: fetch only the base commit. A two-dot diff needs no merge base.
+              git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
+              git diff --name-only "${{ github.event.pull_request.base.sha }}" HEAD > "$changed_files"
+              ;;
+            push|merge_group)
+              echo "run=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+            *)
+              echo "run=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          if grep -Eq '^(crates/zeroclaw-tools/|scripts/ci/run_clippy\.sh$|\.github/workflows/(ci|cross-platform-clippy)\.yml$)' "$changed_files"; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  windows-clippy-tools:
+    name: Clippy (x86_64-pc-windows-msvc, targeted)
+    needs: [windows-clippy-tools-changes]
+    if: ${{ !cancelled() && needs.windows-clippy-tools-changes.result == 'success' && needs.windows-clippy-tools-changes.outputs.run == 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: 1.98.0
+          components: clippy
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        id: rust-cache
+        with:
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - name: Ensure web/dist placeholder exists
+        shell: bash
+        run: mkdir -p web/dist && touch web/dist/.gitkeep
+      - name: Clippy
+        shell: bash
+        run: |
+          bash scripts/ci/run_clippy.sh \
+            --scope tools \
+            --target x86_64-pc-windows-msvc \
+            --summary-title "Targeted Windows Clippy diagnostics" \
+            --log-name cargo-clippy-windows-tools.log
+        env:
+          RUST_CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+
+  windows-required-changes:
+    name: Select required Windows jobs
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5
+    outputs:
+      windows_root: ${{ steps.select.outputs.windows_root }}
+      windows_voice_wake: ${{ steps.select.outputs.windows_voice_wake }}
+      windows_recovery: ${{ steps.select.outputs.windows_recovery }}
+      windows_service: ${{ steps.select.outputs.windows_service }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Test Windows scope contracts
+        run: |
+          bash scripts/ci/windows_recovery_change_filter.test.sh
+          bash scripts/ci/windows_test_scope.test.sh
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: 1.98.0
+      - name: Select required Windows jobs
+        id: select
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+
+          changed_files="$(mktemp)"
+          metadata_file="$(mktemp)"
+          if [[ "$EVENT_NAME" == pull_request ]]; then
+            # Shallow checkout: fetch only the base commit. A two-dot diff needs no merge base.
+            if ! git fetch --no-tags --depth=1 origin "$BASE_SHA" \
+              || ! git diff --name-only "$BASE_SHA" HEAD > "$changed_files"; then
+              # Discard partial evidence so it cannot authorize a skip.
+              : > "$changed_files"
+            fi
+            # No registry resolution, downloads or build-script execution.
+            if ! cargo metadata --locked --offline --no-deps --format-version 1 > "$metadata_file"; then
+              : > "$metadata_file"
+            fi
+          fi
+          python3 scripts/ci/windows_test_scope.py --required-jobs \
+            --event "$EVENT_NAME" --changed-paths-file "$changed_files" \
+            --metadata-file "$metadata_file" --repo-root "$GITHUB_WORKSPACE" \
+            | tee -a "$GITHUB_OUTPUT" >> "$GITHUB_STEP_SUMMARY"
+
+  windows-service-smoke:
+    name: Windows Service Smoke
+    needs: [windows-required-changes]
+    if: needs.windows-required-changes.outputs.windows_service == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: 1.98.0
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: dev-fixture-v1
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - name: Build controlled Windows service fixture
+        # This unshipped fixture proves service lifecycle behavior, so avoid
+        # release optimization and thin LTO before the short smoke.
+        shell: bash
+        run: >-
+          cargo build --profile dev --locked -p zeroclaw-runtime
+          --example windows_service_smoke_fixture
+          --target x86_64-pc-windows-msvc
+      - name: Exercise installed Windows service lifecycle
+        shell: pwsh
+        timeout-minutes: 15
+        run: |
+          ./scripts/ci/windows_service_smoke.ps1 `
+            -FixturePath "target/x86_64-pc-windows-msvc/debug/examples/windows_service_smoke_fixture.exe" `
+            -ConfigDir "$env:USERPROFILE/zeroclaw service smoke 界" `
+            -EvidenceDir "$env:RUNNER_TEMP/windows-service-smoke-evidence"
+      - name: Clean up Windows service smoke
+        if: always()
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          ./scripts/ci/windows_service_smoke.ps1 `
+            -FixturePath "target/x86_64-pc-windows-msvc/debug/examples/windows_service_smoke_fixture.exe" `
+            -ConfigDir "$env:USERPROFILE/zeroclaw service smoke 界" `
+            -EvidenceDir "$env:RUNNER_TEMP/windows-service-smoke-evidence" `
+            -CleanupOnly
+      - name: Upload Windows service smoke evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-service-smoke-evidence
+          path: ${{ runner.temp }}/windows-service-smoke-evidence
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ── Build + check fan-out ─────────────────────────────────────────────────
+
   build:
     name: ${{ matrix.label }} ${{ matrix.target }}
     needs: [master-debounce]
@@ -397,34 +537,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          - os: blacksmith-8vcpu-ubuntu-2404
             target: x86_64-unknown-linux-gnu
             cmd: build
             label: Build
-          # The Apple target is checked on two runners from different pools.
-          #
-          # `macos-15` is an arm64 host, and arm64 macOS capacity on
-          # GitHub-hosted runners is scarce: run 44335338973 recorded "The job
-          # # was not acquired by Runner of type hosted even after multiple
-          # attempts" for this leg, and the leg it cancelled took the whole
-          # `build` job -- and with it the gate -- down. The leg succeeds
-          # about half the time, so this is capacity, not the code.
-          #
-          # `macos-15-intel` is the Intel pool: a different pool, with its own
-          # capacity. The leg is a cross-compile *check* of
-          # `aarch64-apple-darwin`, so it does not need an arm64 host -- the
-          # target's standard library comes from the toolchain step, not
-          # from the runner. Whichever pool has capacity serves the check.
-          #
-          # The other arm64 images are the same pool as `macos-15` -- the
-          # retired macOS 14 images are gone, and `macos-26` and `xcode-27`
-          # share the arm64 capacity -- so the Intel pool is the only
-          # distinct one left.
           - os: macos-15
-            target: aarch64-apple-darwin
-            cmd: check
-            label: Check
-          - os: macos-15-intel
             target: aarch64-apple-darwin
             cmd: check
             label: Check
@@ -437,7 +554,7 @@ jobs:
       - uses: ./.github/actions/rust-cache
         id: rust-cache
         with:
-          use-blacksmith: 'false'
+          use-blacksmith: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Install Linux system dependencies
@@ -497,11 +614,113 @@ jobs:
 
   # Windows admission must not hold the unconditional Linux/macOS matrix.
   # Keep the old build cache identity and commands after splitting this leg.
+  windows-build:
+    name: Check x86_64-pc-windows-msvc
+    needs: [master-debounce, windows-required-changes]
+    if: ${{ !cancelled() && needs.master-debounce.result != 'failure' && needs.windows-required-changes.result == 'success' && (needs.windows-required-changes.outputs.windows_root == 'true' || needs.windows-required-changes.outputs.windows_voice_wake == 'true') }}
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: 1.98.0
+          targets: x86_64-pc-windows-msvc
+      - uses: ./.github/actions/rust-cache
+        id: rust-cache
+        with:
+          use-blacksmith: 'false'
+          shared-key: build
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - name: Ensure web/dist placeholder exists
+        shell: bash
+        run: mkdir -p web/dist && touch web/dist/.gitkeep
+      - name: Check
+        if: needs.windows-required-changes.outputs.windows_root == 'true'
+        shell: bash
+        env:
+          RUST_CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+        run: |
+          set +e
+          cargo_log="${RUNNER_TEMP}/cargo-build-x86_64-pc-windows-msvc.log"
+          SECONDS=0
+          cargo check --profile ci --locked --target x86_64-pc-windows-msvc 2>&1 | tee "$cargo_log"
+          cargo_status=${PIPESTATUS[0]}
+          duration_seconds=$SECONDS
+          set -e
+
+          workspace_path_compiles="$(grep -E -c 'Compiling.*\([^)]*zeroclaw' "$cargo_log" || true)"
+          total_compiles="$(grep -c 'Compiling' "$cargo_log" || true)"
+          downloaded_crates="$(grep -c 'Downloaded' "$cargo_log" || true)"
+          cache_hit="${RUST_CACHE_HIT:-unknown}"
+          summary_file="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          {
+            echo "### Check diagnostics: x86_64-pc-windows-msvc"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Target | \`x86_64-pc-windows-msvc\` |"
+            echo "| Runner OS | \`Windows\` |"
+            echo "| Rust cache exact hit | \`${cache_hit}\` |"
+            echo "| Cargo duration | \`${duration_seconds}s\` |"
+            echo "| Cargo status | \`${cargo_status}\` |"
+            echo "| Workspace path compile lines | \`${workspace_path_compiles}\` |"
+            echo "| Total compile lines | \`${total_compiles}\` |"
+            echo "| Downloaded crate lines | \`${downloaded_crates}\` |"
+          } >> "$summary_file"
+          exit "$cargo_status"
+      - name: Check voice-wake
+        if: needs.windows-required-changes.outputs.windows_voice_wake == 'true'
+        shell: bash
+        run: cargo check --locked -p zeroclaw-channels --no-default-features --features voice-wake --target x86_64-pc-windows-msvc
+
+  # Split out of the Windows build leg so the recovery harness compiles in
+  # parallel with `cargo check` and voice-wake instead of after them. The three
+  # compiles share nothing (check metadata cannot feed a test-profile build), so
+  # running them serially made the Windows leg the most common pacing job.
+  # Recovery-filter invariant and retirement condition: README.md bespoke CI gate registry.
+  windows-task-owner-recovery:
+    name: Test Windows task-owner recovery
+    needs: [windows-required-changes, master-debounce]
+    if: ${{ !cancelled() && needs.master-debounce.result != 'failure' && needs.windows-required-changes.result == 'success' && needs.windows-required-changes.outputs.windows_recovery == 'true' }}
+    runs-on: blacksmith-8vcpu-windows-2025
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: 1.98.0
+          targets: x86_64-pc-windows-msvc
+      # Keep a recovery cache on this runner; do not assume the GitHub build
+      # cache's Rust environment hash matches. Only successful master pushes seed
+      # it; PRs and merge-queue runs read without competing writes.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: windows-recovery-blacksmith
+          cache-on-failure: 'false'
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+      - name: Ensure web/dist placeholder exists
+        shell: bash
+        run: mkdir -p web/dist && touch web/dist/.gitkeep
+      - name: Test Windows task-owner recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p zeroclaw-runtime --lib \
+            --target x86_64-pc-windows-msvc \
+            control_plane::authority::tests::windows_process_exit_is_detected -- --exact 2>&1 | tee "$RUNNER_TEMP/windows-owner-exit.log"
+          grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/windows-owner-exit.log"
+          cargo test --locked -p zeroclaw-runtime --lib \
+            --target x86_64-pc-windows-msvc \
+            control_plane::boot::tests::recovery_retains_live_foreign_process_then_reclaims_after_exit -- --exact 2>&1 | tee "$RUNNER_TEMP/windows-owner-recovery.log"
+          grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/windows-owner-recovery.log"
+
   check:
     name: Check (${{ matrix.name }})
     needs: [master-debounce]
     if: ${{ !cancelled() && needs.master-debounce.result != 'failure' }}
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 20
     env:
       RUSTFLAGS: ${{ matrix.rustflags }}
@@ -536,7 +755,7 @@ jobs:
       - uses: ./.github/actions/rust-cache
         id: rust-cache
         with:
-          use-blacksmith: 'false'
+          use-blacksmith: 'true'
           shared-key: ${{ matrix.cache-key }}
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/master' }}
@@ -552,7 +771,7 @@ jobs:
     name: Check (${{ matrix.name }})
     needs: [master-debounce]
     if: ${{ !cancelled() && needs.master-debounce.result != 'failure' }}
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: ${{ matrix.timeout-minutes || 20 }}
     strategy:
       fail-fast: false
@@ -572,17 +791,7 @@ jobs:
             cache-key: plugins-cranelift-runtime
             # Six serial test steps. Warm-cache runs reached 18-20 minutes
             # and hit the shared 20-minute limit (#10558).
-            #
-            # Upstream raised that to 30 for an 8-vCPU Blacksmith runner. This
-            # fork runs the leg on GitHub-hosted `ubuntu-24.04` -- 4 vCPU --
-            # and run 44354465808 measured what that costs: the plugin
-            # admission step took 5m22s and every step before it passed, but
-            # the job was killed in the root CLI plugin tests with about seven
-            # minutes still to run. It needed roughly 37.
-            #
-            # 45 leaves the compile and the six serial steps room on the
-            # runner this fork actually has.
-            timeout-minutes: 45
+            timeout-minutes: 30
           - name: plugins pulley backend
             features: plugins-wasm-pulley
             suite: check
@@ -630,7 +839,7 @@ jobs:
       - uses: ./.github/actions/rust-cache
         if: steps.changed.outputs.run == 'true'
         with:
-          use-blacksmith: 'false'
+          use-blacksmith: 'true'
           # Keep the new runtime build separate from the existing backend caches.
           shared-key: ${{ matrix.cache-key }}
           cache-on-failure: true
@@ -1207,7 +1416,7 @@ jobs:
     # Explicit status check: an implicit success() would be skipped on PRs,
     # because the skipped push-only master-debounce is a transitive ancestor.
     if: ${{ !cancelled() && needs.installer-drift.result == 'success' }}
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -1230,7 +1439,7 @@ jobs:
           toolchain: ${{ steps.msrv.outputs.version }}
       - uses: ./.github/actions/rust-cache
         with:
-          use-blacksmith: 'false'
+          use-blacksmith: 'true'
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Install system dependencies
@@ -1250,7 +1459,7 @@ jobs:
     name: Check (32-bit)
     needs: [master-debounce]
     if: ${{ !cancelled() && needs.master-debounce.result != 'failure' }}
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -1261,7 +1470,7 @@ jobs:
       - uses: ./.github/actions/rust-cache
         id: rust-cache
         with:
-          use-blacksmith: 'false'
+          use-blacksmith: 'true'
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Install 32-bit system libraries
@@ -1281,7 +1490,7 @@ jobs:
     # and manual runs still execute it, so benches cannot rot undetected before
     # a release; only the per-PR 570s is dropped. Revert by deleting this `if`.
     if: ${{ !cancelled() && needs.master-debounce.result != 'failure' && github.event_name != 'pull_request' }}
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -1291,7 +1500,7 @@ jobs:
       - uses: ./.github/actions/rust-cache
         id: rust-cache
         with:
-          use-blacksmith: 'false'
+          use-blacksmith: 'true'
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Ensure web/dist placeholder exists
@@ -1337,7 +1546,7 @@ jobs:
     name: Test
     needs: [master-debounce]
     if: ${{ !cancelled() && needs.master-debounce.result != 'failure' }}
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -1348,7 +1557,7 @@ jobs:
       - uses: ./.github/actions/rust-cache
         id: rust-cache
         with:
-          use-blacksmith: 'false'
+          use-blacksmith: 'true'
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Check firmware protocol crate
@@ -1359,40 +1568,11 @@ jobs:
         run: bash scripts/ci/apt_install.sh mold expect python3
       - name: Install cargo-nextest
         run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin
-      # Upstream's fleet has no PowerShell, so the Windows-only PowerShell
-      # tests skip themselves there. The GitHub-hosted Ubuntu image ships a
-      # PowerShell, and on 2026-11-18 the copy it shipped was broken:
-      # `pwsh -NoProfile -Command "exit 0"` succeeded -- which is all the
-      # test's probe checks -- while a real script died with a .NET assembly
-      # error, and three PowerShell tests failed for a reason that had
-      # nothing to do with the code. The guard shadows an interpreter that
-      # cannot execute a script, so the tests skip themselves exactly as they
-      # do upstream.
-      - name: Shadow a broken PowerShell interpreter
-        run: bash scripts/ci/powershell_interpreter_guard.sh
       - name: Run tests
         run: cargo nextest run --locked --workspace --exclude zeroclaw-desktop
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
-          # `bedrock::tests::chat_fails_without_credentials` asserts that a
-          # request with no credentials fails on the missing credential and
-          # nothing else. The Bedrock provider reads the instance metadata
-          # service as its last credential source, and that address is not
-          # exclusively AWS's: a GitHub-hosted runner is an Azure VM where it
-          # answers with something that is not an AWS metadata document. The
-          # provider then fails on the shape of the response rather than on
-          # the missing credential, and the test fails with "error decoding
-          # response body". Upstream never sees this because its fleet runs on
-          # Blacksmith, where the address is not reachable.
-          #
-          # The flag is what the AWS SDKs read to skip the metadata service,
-          # and the fork's overlay makes the provider's own client honour it
-          # too. With it set the runner behaves like every other machine:
-          # the credential cannot be resolved, and the test measures what it
-          # is meant to measure. It is scoped to this job -- nothing in the
-          # product is asked to talk to Bedrock from CI.
-          AWS_EC2_METADATA_DISABLED: "true"
       # The crate's default feature set excludes the host-side hardware
       # modules. Compile-only `ci-all` coverage cannot exercise their process,
       # timeout, cleanup, and validation regressions.
@@ -1442,7 +1622,7 @@ jobs:
     name: Test (channel ${{ matrix.name }})
     needs: [master-debounce]
     if: ${{ !cancelled() && needs.master-debounce.result != 'failure' }}
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -1466,7 +1646,7 @@ jobs:
           components: rustfmt, clippy
       - uses: ./.github/actions/rust-cache
         with:
-          use-blacksmith: 'false'
+          use-blacksmith: 'true'
           shared-key: channel-feature-${{ matrix.name }}
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/master' }}
@@ -1493,7 +1673,7 @@ jobs:
     name: Test (opt-in tools)
     needs: [master-debounce]
     if: ${{ !cancelled() && needs.master-debounce.result != 'failure' }}
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -1502,7 +1682,7 @@ jobs:
           toolchain: 1.98.0
       - uses: ./.github/actions/rust-cache
         with:
-          use-blacksmith: 'false'
+          use-blacksmith: 'true'
           shared-key: tool-features
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/master' }}
@@ -1541,16 +1721,8 @@ jobs:
     name: Test (CLI-only build)
     needs: [master-debounce]
     if: ${{ !cancelled() && needs.master-debounce.result != 'failure' }}
-    runs-on: ubuntu-24.04
-    # The 45-minute ceiling was sized upstream, on an 8-vCPU Blacksmith
-    # runner. This fork's fleet is 4-vCPU GitHub-hosted, and run 44388445456
-    # measured the job at 45m25s: 35 minutes for setup, clippy and 1694
-    # tests, then the artifact ratchet was killed with 9 minutes of work
-    # still to do. The ratchet no longer rebuilds the `xtask` binary to
-    # resolve a feature list the job has already resolved (that cost 5m08s
-    # on this runner), and the ceiling is raised to carry the remaining
-    # ratchet work plus headroom for a slower runner.
-    timeout-minutes: 60
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 45
     env:
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -1564,7 +1736,7 @@ jobs:
           targets: wasm32-wasip2
       - uses: ./.github/actions/rust-cache
         with:
-          use-blacksmith: 'false'
+          use-blacksmith: 'true'
           shared-key: cli-only
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/master' }}
@@ -1584,13 +1756,13 @@ jobs:
       - name: Artifact ratchet (CLI-only build)
         run: |
           cargo build --locked -p zeroclaw --bin zeroclaw --no-default-features --features "${{ steps.features.outputs.list }}"
-          bash scripts/ci/cli_only_ratchet.sh run x86_64-unknown-linux-gnu target/debug/zeroclaw "${{ steps.features.outputs.list }}"
+          bash scripts/ci/cli_only_ratchet.sh run x86_64-unknown-linux-gnu target/debug/zeroclaw
 
   memory-postgres-test:
     name: Test (PostgreSQL Memory)
     needs: [master-debounce]
     if: ${{ !cancelled() && needs.master-debounce.result != 'failure' }}
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 20
     services:
       postgres:
@@ -1614,7 +1786,7 @@ jobs:
       - uses: ./.github/actions/rust-cache
         id: rust-cache
         with:
-          use-blacksmith: 'false'
+          use-blacksmith: 'true'
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Ensure web/dist placeholder exists
@@ -1643,7 +1815,7 @@ jobs:
     # does not wait on `fmt`. Waiting would serialise its own multi-minute
     # GitHub-hosted queue wait AFTER fmt and push every dependent that far back.
     # See the ordering note above `fmt` for which dependents still wait on it.
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     outputs:
       run: ${{ steps.changed.outputs.run }}
@@ -1652,8 +1824,6 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Test parallel runtime scope classifier
         run: bash scripts/ci/parallel_runtime_test_scope.test.sh
-      - name: Test parallel runtime gate flake absorption
-        run: bash scripts/ci/parallel_runtime_test_gate_flake.test.sh
       - name: Detect parallel runtime test changes
         id: changed
         shell: bash
@@ -1689,23 +1859,8 @@ jobs:
     name: Parallel Runtime Test
     needs: [parallel-runtime-test-changes]
     if: ${{ !cancelled() && needs.parallel-runtime-test-changes.result == 'success' && needs.parallel-runtime-test-changes.outputs.run == 'true' }}
-    runs-on: ubuntu-24.04
-    # Upstream sized this ceiling on a Blacksmith `8vcpu` runner. This fork
-    # runs it on GitHub-hosted `ubuntu-24.04` -- 4 vCPU -- because
-    # `adl-tan-theta` is a user account with no organisation to inherit a
-    # Blacksmith installation from.
-    #
-    # The job's own test time is not the problem: the six runs took about
-    # twelve minutes in run 44335338973, and every one of them passed. The
-    # ceiling was consumed by compilation -- each run rebuilds the crate
-    # before it can test it, and the rebuild is what halves when the vCPU
-    # count halves.
-    #
-    # 45 gives the compile the room it needs on the runner this fork
-    # actually has, with the test runs themselves still finishing well
-    # inside it. The ceiling is a backstop against a hung job, not a
-    # target.
-    timeout-minutes: 45
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -1714,7 +1869,7 @@ jobs:
       - uses: ./.github/actions/rust-cache
         id: rust-cache
         with:
-          use-blacksmith: 'false'
+          use-blacksmith: 'true'
           shared-key: test
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/master' }}
@@ -1761,7 +1916,7 @@ jobs:
 
   security:
     name: Security
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -1822,7 +1977,7 @@ jobs:
     # does not wait on `fmt`. Waiting would serialise its own multi-minute
     # GitHub-hosted queue wait AFTER fmt and push every dependent that far back.
     # See the ordering note above `fmt` for which dependents still wait on it.
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     outputs:
       docs: ${{ steps.filter.outputs.docs }}
@@ -1880,7 +2035,7 @@ jobs:
     name: Nix Module Eval
     needs: [path-changes]
     if: needs.path-changes.outputs.nix == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -1896,7 +2051,7 @@ jobs:
     name: Nix Hash Drift
     needs: [path-changes]
     if: needs.path-changes.outputs.nix_hash == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -1909,7 +2064,7 @@ jobs:
     name: Docs Style
     needs: [path-changes]
     if: needs.path-changes.outputs.docs == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -1934,7 +2089,7 @@ jobs:
   # Guards Zerocode's RPC-only dependency boundary established in PR #7850; see the bespoke gate registry in README.md.
   zerocode-rpc-boundary:
     name: Zerocode RPC Boundary
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -1962,7 +2117,7 @@ jobs:
     name: Installer Drift
     needs: [master-debounce]
     if: ${{ !cancelled() && needs.master-debounce.result != 'failure' }}
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 15
     outputs:
       all_features: ${{ steps.all_features.outputs.value }}
@@ -1970,19 +2125,15 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Test installer target detection
         run: bash scripts/ci/install_target_triple_test.sh
-      - name: Test installer release resolution
-        run: bash scripts/ci/install_release_resolution_test.sh
       - name: Test installer CLI package-version parsing
         run: bash scripts/ci/install_cli_package_version_test.sh
-      - name: Test the release comparison tool
-        run: python3 scripts/ci/compare_releases_test.py
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: 1.98.0
       - uses: ./.github/actions/rust-cache
         id: rust-cache
         with:
-          use-blacksmith: 'false'
+          use-blacksmith: 'true'
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Check generated install surfaces are in sync with the spec
@@ -2006,7 +2157,7 @@ jobs:
     name: Web Permission Tests
     needs: [path-changes]
     if: needs.path-changes.outputs.web == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -2056,7 +2207,7 @@ jobs:
   # Other changes skip it; the static publish contract still runs in `test`.
   crates-preflight-changes:
     name: Detect crates.io version bump
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     outputs:
       run: ${{ steps.bump.outputs.run }}
@@ -2086,13 +2237,13 @@ jobs:
       release_sha: ${{ github.sha }}
       stage: preflight
       dry_run: true
-      runner: ubuntu-24.04
+      runner: blacksmith-8vcpu-ubuntu-2404
 
   gate:
     name: CI Required Gate
     if: always()
-    needs: [master-debounce, fmt, history-guard, repo-structure, relay-container-smoke-changes, relay-container-smoke, path-changes, lint, build, check, check-plugin-backends, msrv, check-32bit, bench, test, test-channel-features, test-tool-features, test-cli-only, memory-postgres-test, parallel-runtime-test-changes, parallel-runtime-test, test-landlock, security, nix-eval, nix-hash-drift, docs-style, installer-drift, zerocode-rpc-boundary, web-permission-tests, crates-preflight-changes, crates-preflight]
-    runs-on: ubuntu-24.04
+    needs: [master-debounce, fmt, history-guard, repo-structure, relay-container-smoke-changes, relay-container-smoke, path-changes, lint, windows-clippy-tools-changes, windows-clippy-tools, windows-required-changes, windows-service-smoke, build, windows-build, windows-task-owner-recovery, check, check-plugin-backends, msrv, check-32bit, bench, test, test-channel-features, test-tool-features, test-cli-only, memory-postgres-test, parallel-runtime-test-changes, parallel-runtime-test, test-landlock, security, nix-eval, nix-hash-drift, docs-style, installer-drift, zerocode-rpc-boundary, web-permission-tests, crates-preflight-changes, crates-preflight]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Check results
         env:
@@ -2102,3 +2253,24 @@ jobs:
             echo "::error::One or more CI jobs failed or were cancelled"
             exit 1
           fi
+          python3 - <<'PY'
+          import json
+          import os
+
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          detector = needs["windows-required-changes"]
+          if detector["result"] != "success":
+              raise SystemExit("Required Windows selection did not succeed")
+          outputs = detector["outputs"]
+          for job, flags in (
+              ("windows-build", ("windows_root", "windows_voice_wake")),
+              ("windows-service-smoke", ("windows_service",)),
+              ("windows-task-owner-recovery", ("windows_recovery",)),
+          ):
+              if any(outputs.get(flag) not in {"true", "false"} for flag in flags):
+                  raise SystemExit(f"Missing or invalid Windows selection for {job}")
+              selected = any(outputs[flag] == "true" for flag in flags)
+              expected = "success" if selected else "skipped"
+              if needs[job]["result"] != expected:
+                  raise SystemExit(f"{job}: expected {expected}, got {needs[job]['result']}")
+          PY

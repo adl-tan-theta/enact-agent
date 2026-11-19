@@ -79,59 +79,33 @@ def upstream_drift(base):
     )
 
 
-def tracked_delta_paths():
-    """The reviewed list of upstream-owned files the fork keeps modified.
-
-    The overlay file store reaches the prepared tree only. A file that the
-    tracked tree's own tooling reads -- GitHub Actions, the scripts/ci suite,
-    the web build, the installer, the docs gate, cargo-deny -- has to keep
-    its fork text in the tracked tree. This list records those paths and the
-    reason each one cannot be overlaid.
-    """
-    payload = json.loads((ROOT / "overlays/enact/tracked-delta.json").read_text())
-    entries = payload["paths"]
-    recorded = {}
-    for entry in entries:
-        path = entry["path"]
-        if path in recorded:
-            raise RuntimeError(f"Tracked-delta list names {path} twice")
-        if not entry.get("reason"):
-            raise RuntimeError(f"Tracked-delta entry for {path} has no reason")
-        recorded[path] = entry["reason"]
-    return recorded
-
-
 def require_zero_drift(base):
-    """Refuse to release with an unreviewed upstream-owned delta.
+    """Refuse to release when an upstream-owned file carries fork text.
 
-    Every upstream-owned file that carries fork text in the tracked tree is
-    named in `overlays/enact/tracked-delta.json` with the reason it cannot
-    be overlaid. A path that drifts and is not on that list is an
-    unreviewed change to an upstream file, and the release stops.
+    The fork owns no upstream file. Every file upstream ships is
+    byte-identical to the pinned upstream base in the tracked tree, and the
+    fork's version of it lives in the overlay file store, where `prepare()`
+    applies it to the prepared tree.
+
+    A file upstream never had is not drift: the fork's own workflows, its own
+    CI scripts and its own release gates are the fork's to own, and they are
+    tracked under paths upstream does not use.
+
+    This is the whole rule, with no waiver list. A new upstream-owned delta
+    stops the release until it is moved into the store or turned into a
+    projection.
     """
-    allowed = tracked_delta_paths()
     drifted = upstream_drift(base)
-    unreviewed = [path for path in drifted if path not in allowed]
-    if unreviewed:
-        listing = "\n".join(f"  {path}" for path in unreviewed)
+    if drifted:
+        listing = "\n".join(f"  {path}" for path in drifted)
         raise RuntimeError(
-            "Upstream-owned files carry fork text in the tracked tree and are "
-            "not on the reviewed tracked-delta list:\n"
+            "Upstream-owned files carry fork text in the tracked tree:\n"
             f"{listing}\n"
-            "Move a file into overlays/enact/files/ when its only consumer is "
-            "the prepared tree. Otherwise add it to "
-            "overlays/enact/tracked-delta.json with the reason it cannot be "
-            "overlaid."
-        )
-    stale = [path for path in allowed if path not in drifted]
-    if stale:
-        listing = "\n".join(f"  {path}" for path in sorted(stale))
-        raise RuntimeError(
-            "The reviewed tracked-delta list names paths that no longer drift "
-            "from the pinned upstream base:\n"
-            f"{listing}\n"
-            "Remove them: a path that matches upstream again does not need a "
-            "waiver, and a stale waiver hides a future change to it."
+            "The fork owns no upstream file. Move the fork's version into "
+            "overlays/enact/files/ when the file's only consumer is the "
+            "prepared tree, or project the change with an anchored "
+            "replacement in build.py. A file that upstream never had is the "
+            "fork's own and needs no move."
         )
     return drifted
 

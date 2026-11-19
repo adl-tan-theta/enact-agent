@@ -168,20 +168,9 @@ jobs:
     # job-level `if` runs before the matrix expands, so the empty matrix is
     # never handed to fromJSON.
     if: needs.changes.outputs.source_builds == 'true'
-    # Alpine's ARM64 release link needs more memory than the hosted runner
-    # gives it, and this job used to ask for Blacksmith's 32 GB class to get
-    # that headroom. In this fork that label has no runner behind it, and a
-    # runner label with no runner does not fail -- it waits. The
-    # `Dockerfile.alpine` / `linux/arm64` leg sat queued until the 24-hour
-    # run cap killed it (run 41680369174, 24h0m1s).
-    #
-    # The hosted runner already carries the remedy: `dist_runner_memory.sh`
-    # adds a bounded, owned swapfile for exactly the ARM64 release links that
-    # run out of memory. The step below was gated to the default ARM64 build
-    # only, so the Alpine ARM64 leg -- the one that needed the headroom -- was
-    # not covered. It is now covered, and the label request is gone, so the
-    # leg either runs on a runner that exists or never starts.
-    runs-on: ubuntu-latest
+    # Alpine's ARM64 release link needs more memory than the hosted runner.
+    # Keep the existing x64 cross-build and release settings on the 32 GB class.
+    runs-on: ${{ matrix.dockerfile == 'Dockerfile.alpine' && matrix.platform == 'linux/arm64' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -189,12 +178,8 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Prepare bounded memory for ARM64 release links
-        # The ARM64 release links are the ones that run out of memory on a
-        # hosted runner: the default build, and Alpine's, whose release link
-        # needed Blacksmith's 32 GB class upstream. Both get the bounded
-        # swapfile rather than a runner label that may not exist.
-        if: matrix.platform == 'linux/arm64' && !matrix.cargo_flags && (matrix.dockerfile == 'Dockerfile' || matrix.dockerfile == 'Dockerfile.alpine')
+      - name: Prepare bounded memory for default ARM64 source build
+        if: matrix.dockerfile == 'Dockerfile' && matrix.platform == 'linux/arm64' && !matrix.cargo_flags
         id: source_memory
         timeout-minutes: 5
         run: bash scripts/ci/dist_runner_memory.sh prepare
@@ -267,10 +252,7 @@ jobs:
           printf '%s\n' "$dashboard" | grep -Eqi '<html'
 
       - name: Release bounded ARM64 source-build memory
-        # Matches the prepare step exactly. It has to: a swapfile that is
-        # prepared and never released is left mounted on the runner, and the
-        # cleanup script refuses to delete a swapfile it cannot prove it owns.
-        if: always() && matrix.platform == 'linux/arm64' && !matrix.cargo_flags && (matrix.dockerfile == 'Dockerfile' || matrix.dockerfile == 'Dockerfile.alpine')
+        if: always() && matrix.dockerfile == 'Dockerfile' && matrix.platform == 'linux/arm64' && !matrix.cargo_flags
         timeout-minutes: 5
         env:
           ZC_DIST_SWAP_FILE: ${{ steps.source_memory.outputs.swap_file }}
